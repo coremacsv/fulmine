@@ -131,15 +131,31 @@ function StampaSuggerimentoGPU($gpu) {
 # =====================================================================
 
 function ImpostaPianoEnergetico($modalita) {
-    $elenco = powercfg /list
     if ($modalita -eq 'prestazioni') {
-        $ultimate = $elenco | Select-String '([0-9a-f-]{36}).*Prestazioni elevate personalizzate|Ultimate Performance' | Select-Object -First 1
-        if (-not $ultimate) {
-            $creato = powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
-            $ultimate = powercfg /list | Select-String '([0-9a-f-]{36}).*Prestazioni elevate personalizzate|Ultimate Performance' | Select-Object -First 1
+        # Il piano "Ultimate Performance" duplicato si chiama in modo diverso in
+        # ogni lingua di Windows ("Prestazioni eccellenti" in italiano, "Ultimate
+        # Performance" in inglese...): cercarlo per nome non funziona su "tutti i
+        # PC Windows" come deve fare Fulmine. Il GUID invece non cambia mai lingua,
+        # quindi lo salviamo noi al momento della creazione e lo riusiamo dopo -
+        # senza, ogni avvio di Fulmine in questa modalita' ne creerebbe uno nuovo,
+        # riempiendo l'elenco dei piani energetici di doppioni.
+        $guid = $null
+        if (Test-Path -LiteralPath $fileBackup) {
+            $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+            if ($b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
+                $guid = $b.ultimatePerfGuid
+            }
         }
-        if ($ultimate) {
-            $guid = [regex]::Match($ultimate.Line, '([0-9a-f-]{36})').Value
+        if (-not $guid) {
+            $creato = powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+            $guid = [regex]::Match(($creato -join ' '), '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})').Value
+            if ($guid -and (Test-Path -LiteralPath $fileBackup)) {
+                $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+                $b | Add-Member -NotePropertyName 'ultimatePerfGuid' -NotePropertyValue $guid -Force
+                $b | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8
+            }
+        }
+        if ($guid) {
             powercfg /setactive $guid
             Fatto "Piano energetico -> Prestazioni elevate personalizzate (il piu' aggressivo che Windows offre)"
         } else {
@@ -380,6 +396,10 @@ if ($scelta -eq '4') {
         $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
         Nota "Backup del $([datetime]$b.creato | ForEach-Object { $_.ToString('dd/MM/yyyy HH:mm') })"
         if ($b.pianoEnergetico) { powercfg /setactive $b.pianoEnergetico; Fatto "Piano energetico ripristinato" }
+        if ($b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
+            powercfg -delete $b.ultimatePerfGuid
+            Fatto "Piano 'Prestazioni elevate personalizzate' creato da Fulmine -> rimosso (torna a come era prima anche nell'elenco)"
+        }
         if ($null -ne $b.hags) {
             Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value $b.hags -Type DWord -Force
             Fatto "Pianificazione GPU ripristinata"; Riavvio "La pianificazione GPU richiede un riavvio."
