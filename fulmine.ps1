@@ -1,7 +1,7 @@
 ﻿# =====================================================================
 #
 #   FULMINE  -  il PC a razzo con un clic
-#   Versione 1.2  -  by lozy
+#   Versione 1.3  -  by lozy
 #
 #   Un doppio clic su FULMINE.bat: scansiona il PC e sistema da solo
 #   tutto quello che rallenta (monitor sotto la frequenza massima,
@@ -29,7 +29,7 @@ $script:Prova = [bool]$Prova
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
-$VERSIONE = '1.2'
+$VERSIONE = '1.3'
 
 function Ok($m)      { Write-Host "  [ OK ] $m" -ForegroundColor Green }
 function Nota($m)    { Write-Host "  [ .. ] $m" -ForegroundColor Gray }
@@ -530,6 +530,138 @@ function ControllaRAM {
 }
 
 # =====================================================================
+#  NOVITA' 1.3: portatili, doppia scheda video, giochi in finestra,
+#  condivisione degli aggiornamenti, accelerazione del mouse.
+# =====================================================================
+
+# --- Portatile? ----------------------------------------------------------
+function RilevaPortatile {
+    $telaio = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes)
+    $tipiPortatile = 8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32
+    [bool]((@($telaio | Where-Object { $_ -in $tipiPortatile }).Count) -or @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).Count)
+}
+
+# Sul piano energetico creato da Fulmine: in carica tutto al massimo, a
+# batteria niente turbo e processore libero di scendere (meno calore, piu'
+# autonomia). Si tocca SOLO il piano di Fulmine, che Ripristina cancella.
+function AdattaPortatile {
+    if (-not $script:Portatile) { return }
+    $guid = $null
+    if (Test-Path -LiteralPath $fileBackup) { $guid = (Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json).ultimatePerfGuid }
+    if (-not $guid -or -not ((powercfg /getactivescheme) -match [regex]::Escape($guid))) {
+        Nota "Portatile: piano energetico non creato da Fulmine, lo lascio com'e' a batteria"
+        return
+    }
+    powercfg /setdcvalueindex $guid SUB_PROCESSOR PERFBOOSTMODE 0 | Out-Null
+    powercfg /setdcvalueindex $guid SUB_PROCESSOR PROCTHROTTLEMIN 5 | Out-Null
+    powercfg /setactive $guid | Out-Null
+    Risolto "Portatile: prestazioni piene in carica, a batteria turbo spento (meno calore, piu' autonomia)"
+}
+
+# --- Doppia scheda video (integrata + dedicata) ---------------------------
+function ElencoGPU {
+    Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'Basic|Remote|Virtual|Parsec|Meta' } | ForEach-Object {
+        # Le Intel Arc con numero di modello (A770, B580...) sono dedicate; 'Arc Graphics' e' l'integrata dei Core Ultra.
+        $integrata = ($_.Name -match 'Intel\(R\) (UHD|HD|Iris)|^Intel.*Graphics$|Radeon\(TM\) (Graphics|Vega)|^AMD Radeon Graphics$|Radeon\(TM\) \d{3,4}M') -and ($_.Name -notmatch 'Arc\(TM\) [AB]\d{3}')
+        [pscustomobject]@{ Nome = $_.Name; Integrata = $integrata }
+    }
+}
+function TrovaGiochiInstallati {
+    $cartelle = New-Object System.Collections.Generic.List[string]
+    $steam = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath
+    if ($steam) {
+        $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+        $librerie = @($steam) + @(if (Test-Path $vdf) { [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"') | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' } })
+        foreach ($l in ($librerie | Select-Object -Unique)) { Get-ChildItem (Join-Path $l 'steamapps\common') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $cartelle.Add($_.FullName) } }
+    }
+    foreach ($r in "$env:ProgramFiles\Epic Games", "${env:ProgramFiles(x86)}\Epic Games") { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | ForEach-Object { $cartelle.Add($_.FullName) } }
+    Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Publisher -match 'Activision|Blizzard|Electronic Arts|Riot|Ubisoft|Epic Games|Rockstar|Bethesda|CD PROJEKT|Valve' -and $_.InstallLocation -and (Test-Path $_.InstallLocation) } |
+        ForEach-Object { $cartelle.Add($_.InstallLocation.TrimEnd('\')) }
+    $escludi = 'unins|setup|install|crash|report|redist|vcredist|directx|dotnet|launcher|helper|updater|update|anticheat|easyanticheat|battleye|attestation|wizard|cef|webhelper|overlay|bootstrap'
+    $cartelle | Select-Object -Unique | ForEach-Object {
+        Get-ChildItem $_ -Filter *.exe -Recurse -Depth 2 -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 5MB -and $_.BaseName -notmatch $escludi }
+    } | Select-Object -First 200 -ExpandProperty FullName -Unique
+}
+function GpuDedicataPerGiochi {
+    $gpu = @(ElencoGPU)
+    if (-not (@($gpu | Where-Object Integrata).Count -and @($gpu | Where-Object { -not $_.Integrata }).Count)) {
+        Ok "Scheda video: una sola (nessuna scelta tra integrata e dedicata da fare)"
+        return
+    }
+    $dedicata = ($gpu | Where-Object { -not $_.Integrata } | Select-Object -First 1).Nome
+    $chiave = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+    if (-not (Test-Path $chiave)) { if (-not $script:Prova) { New-Item -Path $chiave -Force | Out-Null } }
+    $esistenti = Get-ItemProperty $chiave -ErrorAction SilentlyContinue
+    $nuovi = @(TrovaGiochiInstallati | Where-Object { -not ($esistenti -and $esistenti.PSObject.Properties[$_]) })
+    if ($nuovi.Count -eq 0) { Ok "Doppia scheda video: i giochi trovati usano gia' la dedicata ($dedicata)"; return }
+    Problema "PC con doppia scheda video: $($nuovi.Count) giochi potrebbero partire sulla scheda integrata"
+    if ($script:Prova) { Nota "[PROVA] imposterei $($nuovi.Count) giochi sulla scheda dedicata ($dedicata)"; return }
+    foreach ($exe in $nuovi) { Set-ItemProperty -Path $chiave -Name $exe -Value 'GpuPreference=2;' -Type String -Force }
+    $script:GpuAggiunti = $nuovi
+    Risolto "$($nuovi.Count) giochi impostati sulla scheda dedicata ($dedicata)"
+    [void]$script:DaFare.Add("Giochi installati in altre cartelle: Impostazioni > Sistema > Schermo > Grafica > scegli il gioco > Prestazioni elevate")
+}
+
+# --- Ottimizzazioni per i giochi in finestra + frequenza variabile ----------
+$script:ChiaveDX = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+function ImpostaOpzioneDX([hashtable]$Valori) {
+    $attuale = (Get-ItemProperty $script:ChiaveDX -Name DirectXUserGlobalSettings -ErrorAction SilentlyContinue).DirectXUserGlobalSettings
+    $coppie = [ordered]@{}
+    foreach ($p in ([string]$attuale -split ';' | Where-Object { $_ -match '=' })) { $k, $v = $p -split '=', 2; $coppie[$k.Trim()] = $v.Trim() }
+    $cambiate = @()
+    foreach ($k in $Valori.Keys) { if ($coppie[$k] -ne $Valori[$k]) { $coppie[$k] = $Valori[$k]; $cambiate += $k } }
+    if ($cambiate.Count -and -not $script:Prova) {
+        if (-not (Test-Path $script:ChiaveDX)) { New-Item -Path $script:ChiaveDX -Force | Out-Null }
+        $testo = (($coppie.Keys | ForEach-Object { "$_=$($coppie[$_])" }) -join ';') + ';'
+        Set-ItemProperty -Path $script:ChiaveDX -Name DirectXUserGlobalSettings -Value $testo -Type String -Force
+    }
+    $cambiate
+}
+function OttimizzaGiochiInFinestra {
+    $cambiate = @(ImpostaOpzioneDX @{ SwapEffectUpgradeEnable = '1'; VRROptimizeEnable = '1' })
+    if (-not $cambiate.Count) { Ok "Ottimizzazioni per i giochi in finestra e frequenza variabile: gia' attive"; return }
+    Problema "Ottimizzazioni per i giochi in finestra / frequenza variabile non attive"
+    if ($script:Prova) { Nota "[PROVA] attiverei le ottimizzazioni per i giochi in finestra e la frequenza variabile"; return }
+    Risolto "Ottimizzazioni per i giochi in finestra e frequenza variabile (FreeSync/G-Sync) -> attive (meno ritardo nei giochi a schermo intero in finestra)"
+}
+
+# --- Windows Update: niente invio di aggiornamenti ad altri PC --------------
+$script:ChiaveDO = 'Registry::HKEY_USERS\S-1-5-20\Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings'
+function SpegniCondivisioneUpdate {
+    $attuale = (Get-ItemProperty $script:ChiaveDO -Name DownloadMode -ErrorAction SilentlyContinue).DownloadMode
+    if ($attuale -eq 0) { Ok "Windows Update: condivisione degli aggiornamenti con altri PC gia' spenta"; return }
+    Problema "Windows Update usa la tua connessione per inviare aggiornamenti ad altri PC"
+    if ($script:Prova) { Nota "[PROVA] spegnerei la condivisione degli aggiornamenti con altri PC"; return }
+    try {
+        if (-not (Test-Path $script:ChiaveDO)) { New-Item -Path $script:ChiaveDO -Force -ErrorAction Stop | Out-Null }
+        Set-ItemProperty -Path $script:ChiaveDO -Name DownloadMode -Value 0 -Type DWord -Force -ErrorAction Stop
+        Risolto "Windows Update: condivisione degli aggiornamenti con altri PC -> spenta (banda libera, meno lag)"
+    } catch { TocaATe "Spegni a mano: Impostazioni > Windows Update > Opzioni avanzate > Ottimizzazione recapito > Consenti download da altri dispositivi: No" }
+}
+
+# --- Accelerazione del mouse ("Migliora precisione puntatore") -------------
+if (-not ('FulmineMouse' -as [type])) {
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class FulmineMouse {
+  [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint a, uint p, int[] v, uint w);
+  // [soglia1, soglia2, accelerazione]: 0,0,0 = accelerazione spenta. Applica subito e salva.
+  public static bool Imposta(int t1, int t2, int acc) { return SystemParametersInfo(0x0004, 0, new int[] { t1, t2, acc }, 0x03); }
+}
+"@
+}
+function SpegniAccelerazioneMouse {
+    $m = Get-ItemProperty 'HKCU:\Control Panel\Mouse' -ErrorAction SilentlyContinue
+    if ($m -and "$($m.MouseSpeed)" -eq '0') { Ok "Accelerazione del mouse: gia' spenta (mira costante)"; return }
+    Problema "Accelerazione del mouse accesa: la mira cambia con la velocita' del movimento"
+    if ($script:Prova) { Nota "[PROVA] spegnerei l'accelerazione del mouse"; return }
+    if ([FulmineMouse]::Imposta(0, 0, 0)) { Risolto "Accelerazione del mouse ('Migliora precisione puntatore') -> spenta (mira costante)" }
+    else { TocaATe "Spegni a mano: Impostazioni > Bluetooth e dispositivi > Mouse > Impostazioni aggiuntive > Puntatore > togli 'Migliora precisione puntatore'" }
+}
+
+# =====================================================================
 #  BACKUP delle voci nuove (1.2): per chi ha gia' un backup creato con
 #  una versione precedente, si aggiungono SOLO le voci mancanti, prese
 #  ora, prima di cambiarle. Le voci gia' salvate non si toccano.
@@ -538,6 +670,10 @@ function StatoNuoveVoci {
     @{
         schermi = @(ElencoSchermi | ForEach-Object { @{ nome = $_.Nome; monitor = $_.Monitor; l = $_.L; a = $_.A; hz = $_.Hz } })
         avvio   = @(ElencoAvvioInutile | ForEach-Object { @{ tipo = $_.Tipo; chiave = $_.Chiave; nome = $_.Nome; originale = $_.Originale } })
+        # 1.3 (avvolti in @{ v = ... } per distinguere 'non salvato' da 'non esisteva')
+        dx      = @{ v = (Get-ItemProperty $script:ChiaveDX -Name DirectXUserGlobalSettings -ErrorAction SilentlyContinue).DirectXUserGlobalSettings }
+        doMode  = @{ v = (Get-ItemProperty $script:ChiaveDO -Name DownloadMode -ErrorAction SilentlyContinue).DownloadMode }
+        mouse   = $($m = Get-ItemProperty 'HKCU:\Control Panel\Mouse' -ErrorAction SilentlyContinue; @{ speed = [int]$m.MouseSpeed; t1 = [int]$m.MouseThreshold1; t2 = [int]$m.MouseThreshold2 })
     }
 }
 function CompletaBackup {
@@ -548,6 +684,9 @@ function CompletaBackup {
     $cambiato = $false
     if ($null -eq $b.schermi) { $b | Add-Member -NotePropertyName schermi -NotePropertyValue $nuove.schermi -Force; $cambiato = $true }
     if ($null -eq $b.avvio)   { $b | Add-Member -NotePropertyName avvio   -NotePropertyValue $nuove.avvio   -Force; $cambiato = $true }
+    foreach ($k in 'dx', 'doMode', 'mouse') {
+        if ($null -eq $b.$k) { $b | Add-Member -NotePropertyName $k -NotePropertyValue $nuove[$k] -Force; $cambiato = $true }
+    }
     else {
         # Programmi della lista comparsi dopo il primo backup: si salva il loro stato attuale.
         $noti = @($b.avvio | ForEach-Object { "$($_.chiave)|$($_.nome)" })
@@ -556,6 +695,15 @@ function CompletaBackup {
     }
     if ($cambiato) { $b | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8 }
     return $true
+}
+
+# I giochi impostati sulla scheda dedicata si aggiungono al backup, per toglierli con Ripristina.
+function SalvaGpuAggiunti {
+    if (-not $script:GpuAggiunti -or -not (Test-Path -LiteralPath $fileBackup)) { return }
+    $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+    $tutti = @(@($b.gpuAggiunti) + $script:GpuAggiunti | Where-Object { $_ } | Select-Object -Unique)
+    $b | Add-Member -NotePropertyName gpuAggiunti -NotePropertyValue $tutti -Force
+    $b | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8
 }
 
 function RipristinaNuoveVoci($b) {
@@ -580,6 +728,31 @@ function RipristinaNuoveVoci($b) {
         } catch { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare l'avvio di $(NomeLeggibile $a.nome)" }
     }
     if ($n) { Fatto "Programmi all'avvio riportati com'erano ($n)" }
+    if ($b.dx) {
+        try {
+            if ($null -eq $b.dx.v) { Remove-ItemProperty -Path $script:ChiaveDX -Name DirectXUserGlobalSettings -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -Path $script:ChiaveDX -Name DirectXUserGlobalSettings -Value ([string]$b.dx.v) -Type String -Force -ErrorAction Stop }
+            Fatto "Ottimizzazioni per i giochi in finestra ripristinate"
+        } catch { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare le ottimizzazioni per i giochi in finestra" }
+    }
+    if ($b.doMode) {
+        try {
+            if ($null -eq $b.doMode.v) { Remove-ItemProperty -Path $script:ChiaveDO -Name DownloadMode -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -Path $script:ChiaveDO -Name DownloadMode -Value ([int]$b.doMode.v) -Type DWord -Force -ErrorAction Stop }
+            Fatto "Condivisione degli aggiornamenti di Windows ripristinata"
+        } catch { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare la condivisione degli aggiornamenti" }
+    }
+    if ($b.mouse) {
+        if ([FulmineMouse]::Imposta([int]$b.mouse.t1, [int]$b.mouse.t2, [int]$b.mouse.speed)) { Fatto "Accelerazione del mouse ripristinata" }
+        else { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare l'accelerazione del mouse" }
+    }
+    $g = 0
+    foreach ($exe in @($b.gpuAggiunti)) {
+        if (-not $exe) { continue }
+        $v = (Get-ItemProperty $script:ChiaveDX -Name $exe -ErrorAction SilentlyContinue).$exe
+        if ($v -eq 'GpuPreference=2;') { Remove-ItemProperty -Path $script:ChiaveDX -Name $exe -ErrorAction SilentlyContinue; $g++ }
+    }
+    if ($g) { Fatto "Preferenza scheda video tolta da $g giochi (come prima di Fulmine)" }
 }
 
 # =====================================================================
@@ -685,6 +858,8 @@ if ($Ripristina) {
     }
     StampaSuggerimentoGPU $gpu
     Nota "Disco di sistema: $(if($ceSSD){'SSD'}else{'HDD o non rilevato'})"
+    $script:Portatile = RilevaPortatile
+    Nota "Tipo di PC: $(if ($script:Portatile) { 'portatile (adatto il piano energetico alla batteria)' } else { 'fisso' })"
     ControllaRAM
     ControllaDriverVideo $gpu
     ControllaSpazioDisco
@@ -706,12 +881,18 @@ if ($Ripristina) {
     Write-Host ("  " + ("-" * 68)) -ForegroundColor DarkGray
     CorreggiFrequenzaMonitor
     DisattivaAvvioInutile
+    GpuDedicataPerGiochi
+    OttimizzaGiochiInFinestra
+    SpegniCondivisioneUpdate
+    SpegniAccelerazioneMouse
+    if (-not $Prova) { SalvaGpuAggiunti }
     if ($Prova) {
         Nota "[PROVA] applicherei anche: piano energetico massimo, pianificazione GPU, effetti visivi minimi,"
         Nota "[PROVA] app in background bloccate, Game Bar senza registrazione, priorita' al gioco,"
         Nota "[PROVA] risparmio energia di rete spento, pulizia file temporanei, TRIM degli SSD."
     } else {
         ImpostaPianoEnergetico 'prestazioni'
+        AdattaPortatile
         ImpostaHAGS $true
         ImpostaEffettiVisivi 'prestazioni'
         ImpostaAppInBackground $true

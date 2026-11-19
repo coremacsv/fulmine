@@ -26,7 +26,7 @@ Fine. Niente menu, niente scelte.
 
 ## Cosa fa con quel clic
 
-**1. Scansione.** Scheda video, disco di sistema, RAM, età del driver video, spazio libero.
+**1. Scansione.** Fisso o portatile, scheda video (una o due), disco di sistema, RAM, età del driver video, spazio libero.
 
 **2. Ottimizzazione automatica:**
 
@@ -34,6 +34,11 @@ Fine. Niente menu, niente scelte.
 |---|---|
 | 🖥️ **Monitor** | se un monitor va a 60 Hz ma ne supporta di più (144, 240…), lo porta alla **frequenza massima**, senza cambiare la risoluzione |
 | 🚀 **Programmi all'avvio** | toglie dall'avvio **solo** programmi Microsoft che partono senza motivo (Teams, Edge, Office, Collegamento al telefono, Copilot, To Do…). **Non tocca mai** Discord, i launcher dei giochi, il software di mouse/tastiere/cuffie, l'antivirus, i driver, OneDrive |
+| 💻 **Portatili** | riconosce il portatile: prestazioni piene **in carica**, a batteria niente turbo e processore libero di scendere (meno calore, più autonomia) |
+| 🎮 **Doppia scheda video** | sui PC con scheda integrata + dedicata, imposta i giochi installati (Steam, Epic, Battle.net, EA, Riot, Ubisoft…) sulla **dedicata**, così non partono su quella debole. Non tocca le preferenze già impostate |
+| 🪟 **Giochi in finestra** | attiva le *Ottimizzazioni per i giochi in finestra* e la *frequenza variabile* (FreeSync/G-Sync) di Windows: meno ritardo nei giochi a schermo intero in finestra, come Warzone |
+| 🌐 **Windows Update** | spegne l'invio di aggiornamenti ad altri PC su Internet: banda libera, meno lag |
+| 🖱️ **Mouse** | spegne l'accelerazione ("Migliora precisione puntatore"): la mira non cambia con la velocità del movimento |
 | ⚡ **Windows** | piano energetico al massimo, pianificazione GPU accelerata, Game Bar senza registrazione in background, app in background bloccate, priorità al gioco, effetti visivi minimi, schermo intero esclusivo, risparmio energia di rete spento |
 | 🧹 **Pulizia** | file temporanei più vecchi di 7 giorni, TRIM sugli SSD |
 
@@ -56,7 +61,13 @@ Quello che un programma **non può** fare da solo finisce in **DA FARE TU**, con
 
 ## Tornare indietro: `Ripristina.bat`
 
-Doppio clic su **`Ripristina.bat`**: tutto torna esattamente allo stato di **prima** di aver mai usato Fulmine, comprese frequenza dei monitor e programmi all'avvio.
+Doppio clic su **`Ripristina.bat`**: tutto torna esattamente allo stato di **prima** di aver mai usato Fulmine, comprese frequenza dei monitor, programmi all'avvio, mouse, giochi in finestra, Windows Update e preferenze della scheda video.
+
+## Cosa non fa, di proposito
+
+- **Non abbassa la sicurezza**: antivirus, firewall e isolamento del kernel non si toccano, anche se spegnerli darebbe qualche FPS.
+- **Niente overclock** di processore o scheda video: può rendere il PC instabile o danneggiarlo.
+- **Non entra nel BIOS**: XMP e Resizable BAR si attivano da lì, e il rapporto spiega come.
 
 ## Perché puoi fidarti
 
