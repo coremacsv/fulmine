@@ -1,25 +1,35 @@
 ﻿# =====================================================================
 #
-#   FULMINE  -  ottimizzazione prestazioni per Windows
-#   Versione 1.0  -  by lozy
+#   FULMINE  -  il PC a razzo con un clic
+#   Versione 1.2  -  by lozy
 #
-#   Ottimizza piano energetico, pianificazione GPU, effetti visivi,
-#   app in background, priorita' dei processi, servizi e rete con un
-#   doppio clic, in tre modalita' (Prestazioni / Qualita' / Bilanciata),
-#   piu' un Ripristino che torna esattamente a come era prima.
+#   Un doppio clic su FULMINE.bat: scansiona il PC e sistema da solo
+#   tutto quello che rallenta (monitor sotto la frequenza massima,
+#   programmi inutili all'avvio, piano energetico, GPU, Game Bar,
+#   priorita', rete, file temporanei...). Alla fine un rapporto dice
+#   cosa ha trovato, cosa ha sistemato e cosa resta da fare (BIOS, driver).
+#   Ripristina.bat torna esattamente a come era prima.
 #
 #   REGOLA FERREA: prima di cambiare qualsiasi cosa, salva il valore
 #   ORIGINALE in un backup che non viene mai sovrascritto. Ogni
-#   modifica e' quindi reversibile con un clic (modalita' Ripristina).
+#   impostazione e' quindi reversibile con un clic (modalita' Ripristina).
+#   Unica eccezione: i file temporanei cancellati non tornano indietro.
 #
 #   NON tocca MAI l'antivirus o il firewall: dopo un'infezione vera,
 #   "piu' veloce" non vale "meno sicuro". Nessuna eccezione.
 #
 # =====================================================================
 
+param(
+    [switch]$Ripristina,   # torna allo stato di prima di Fulmine
+    [switch]$Prova,        # controlla tutto ma non cambia niente
+    [switch]$NoPause       # niente attesa finale (test)
+)
+$script:Prova = [bool]$Prova
+
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
-$VERSIONE = '1.0'
+$VERSIONE = '1.2'
 
 function Ok($m)      { Write-Host "  [ OK ] $m" -ForegroundColor Green }
 function Nota($m)    { Write-Host "  [ .. ] $m" -ForegroundColor Gray }
@@ -85,12 +95,15 @@ function Backup {
     if (-not (Test-Path -LiteralPath $cartellaStato)) { New-Item -ItemType Directory -Path $cartellaStato -Force | Out-Null }
     if (Test-Path -LiteralPath $fileBackup) {
         $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+        if (-not $b -or -not $b.creato) { return $false }
         Nota "Backup originale gia' presente (creato il $([datetime]$b.creato | ForEach-Object { $_.ToString('dd/MM/yyyy HH:mm') })): non lo tocco."
-        return
+        return $true
     }
     $stato = CatturaStatoAttuale
     $stato | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8
-    Ok "Stato originale salvato: potrai sempre tornare qui con Ripristina (opzione 4)."
+    if (-not (Test-Path -LiteralPath $fileBackup)) { return $false }
+    Ok "Stato originale salvato: potrai sempre tornare qui con Ripristina.bat"
+    return $true
 }
 
 # =====================================================================
@@ -173,11 +186,17 @@ function ImpostaPianoEnergetico($modalita) {
 
 function ImpostaHAGS($attiva) {
     $percorso = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
-    $valore = if ($attiva) { 2 } else { 0 }
-    $attuale = LeggiValore $percorso 'HwSchMode' 0
-    if ($attuale -eq $valore) { Ok "Pianificazione GPU accelerata da hardware: gia' come richiesto"; return }
-    Set-ItemProperty -Path $percorso -Name 'HwSchMode' -Value $valore -Type DWord -Force
-    Fatto "Pianificazione GPU accelerata da hardware -> $(if($attiva){'attivata'}else{'disattivata'})"
+    # 2 = attiva, 1 = spenta. Senza il valore decide Windows: e' il vero "predefinito".
+    $attuale = LeggiValore $percorso 'HwSchMode' $null
+    if ($attiva) {
+        if ($attuale -eq 2) { Ok "Pianificazione GPU accelerata da hardware: gia' come richiesto"; return }
+        Set-ItemProperty -Path $percorso -Name 'HwSchMode' -Value 2 -Type DWord -Force
+        Fatto "Pianificazione GPU accelerata da hardware -> attivata"
+    } else {
+        if ($null -eq $attuale) { Ok "Pianificazione GPU accelerata da hardware: gia' sul predefinito di Windows"; return }
+        Remove-ItemProperty -Path $percorso -Name 'HwSchMode' -Force
+        Fatto "Pianificazione GPU accelerata da hardware -> predefinito di Windows"
+    }
     Riavvio "La pianificazione GPU richiede un riavvio per avere effetto."
 }
 
@@ -257,10 +276,15 @@ function ImpostaFullscreenOptimizations($abilitaGlobalmente) {
 
 function ImpostaRisparmioEnergiaSchedeRete($disattiva) {
     $n = 0
+    # Questa classe elenca anche hub USB, tastiere e altro: si toccano solo le schede di rete.
+    $schede = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { $_.PnPDeviceID } | Where-Object { $_ })
     foreach ($a in (Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue)) {
+        $eScheda = $false
+        foreach ($id in $schede) { if ($a.InstanceName.StartsWith($id, [StringComparison]::OrdinalIgnoreCase)) { $eScheda = $true } }
+        if (-not $eScheda) { continue }
         try {
             $a.Enable = -not $disattiva
-            Set-CimInstance -InputObject $a -ErrorAction SilentlyContinue
+            Set-CimInstance -InputObject $a -ErrorAction Stop
             $n++
         } catch { }
     }
@@ -268,17 +292,49 @@ function ImpostaRisparmioEnergiaSchedeRete($disattiva) {
     else { Nota "Nessuna scheda di rete compatibile trovata per questa impostazione." }
 }
 
-function PuliziaRapida {
-    $liberatiMB = 0
-    foreach ($c in @($env:TEMP, "$env:SystemRoot\Temp")) {
-        if (Test-Path -LiteralPath $c) {
-            $prima = (Get-ChildItem $c -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-            Get-ChildItem $c -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            $dopo = (Get-ChildItem $c -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-            if ($prima) { $liberatiMB += [math]::Round(($prima - $dopo)/1MB) }
+# I file recenti possono servire a un'installazione o a un programma aperto. I
+# collegamenti a cartelle si saltano: seguirli cancellerebbe file fuori dalla cartella.
+function PulisciCartellaTemp($cartella, $limite) {
+    $liberati = 0L
+    foreach ($x in (Get-ChildItem -LiteralPath $cartella -Force -ErrorAction SilentlyContinue)) {
+        if ($x.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+        if ($x.PSIsContainer) {
+            $vecchia = $x.LastWriteTime -lt $limite
+            $liberati += PulisciCartellaTemp $x.FullName $limite
+            if ($vecchia) { try { [IO.Directory]::Delete($x.FullName) } catch { } }
+        } elseif ($x.LastWriteTime -lt $limite) {
+            $dimensione = $x.Length
+            Remove-Item -LiteralPath $x.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $x.FullName)) { $liberati += $dimensione }
         }
     }
-    Fatto "File temporanei ripuliti: circa $liberatiMB MB liberati"
+    return $liberati
+}
+function PuliziaRapida {
+    $limite = (Get-Date).AddDays(-7)
+    $liberati = 0L
+    foreach ($c in @($env:TEMP, "$env:SystemRoot\Temp")) {
+        if (Test-Path -LiteralPath $c) { $liberati += PulisciCartellaTemp $c $limite }
+    }
+    Fatto "File temporanei piu' vecchi di 7 giorni ripuliti: circa $([math]::Round($liberati/1MB)) MB liberati"
+}
+$ripristiniFalliti = 0
+function RipristinaValore($percorso, $nome, $valore, $etichetta) {
+    try {
+        if ($null -eq $valore) {
+            # Il valore in origine non esisteva: tornare indietro vuol dire toglierlo.
+            if ($null -ne (Get-ItemProperty -Path $percorso -Name $nome -ErrorAction SilentlyContinue)) {
+                Remove-ItemProperty -Path $percorso -Name $nome -Force -ErrorAction Stop
+            }
+        } else {
+            if (-not (Test-Path $percorso)) { New-Item -Path $percorso -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $percorso -Name $nome -Value $valore -Type DWord -Force -ErrorAction Stop
+        }
+        if ($etichetta) { Fatto "$etichetta ripristinati" }
+    } catch {
+        $script:ripristiniFalliti++
+        Avviso "Non sono riuscito a ripristinare $nome : $($_.Exception.Message)"
+    }
 }
 
 function TrimDischiSSD($dischi) {
@@ -292,13 +348,243 @@ function TrimDischiSSD($dischi) {
 }
 
 # =====================================================================
-#  MENU
+#  SCANSIONE E CORREZIONE  (novita' 1.2)
+#  Ogni controllo registra il problema trovato e, se lo sistema da
+#  solo, la soluzione applicata. Quello che il software non puo' fare
+#  (BIOS, driver) finisce in "Da fare tu" con le istruzioni.
 # =====================================================================
-function Centrato($testo, $L) {
-    $sx = [int](($L - $testo.Length) / 2); if ($sx -lt 0) { $sx = 0 }
-    $dx = $L - $sx - $testo.Length; if ($dx -lt 0) { $dx = 0 }
-    return "   |" + (" " * $sx) + $testo + (" " * $dx) + "|"
+$script:Trovati   = New-Object System.Collections.ArrayList
+$script:Sistemati = New-Object System.Collections.ArrayList
+$script:DaFare    = New-Object System.Collections.ArrayList
+function Problema($m)  { [void]$script:Trovati.Add($m) }
+function Risolto($m)   { [void]$script:Sistemati.Add($m); Fatto $m }
+function TocaATe($m)   { [void]$script:DaFare.Add($m); Avviso $m }
+
+# --- Monitor: frequenza di aggiornamento ------------------------------
+if (-not ('FulmineSchermi' -as [type])) {
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices; using System.Collections.Generic;
+public static class FulmineSchermi {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string n; public short spec,drv,size,extra; public int fields;
+    public int px,py; public int orient; public int fixedo; public short col,dup,yres,tt,coll;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string fn; public short lp; public int bpp,w,h,dflags,freq,icm,ii,mt,dt,r1,r2,pw2,ph2; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct DD { public int cb;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string Name; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string Str;
+    public int Flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string Id; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string Key; }
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool EnumDisplaySettingsW(string dev, int mode, ref DEVMODE dm);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool EnumDisplayDevicesW(string dev, int i, ref DD dd, int f);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int ChangeDisplaySettingsExW(string dev, ref DEVMODE dm, IntPtr h, int flags, IntPtr p);
+  // Restituisce: nome|monitor|larghezza|altezza|bit|Hz attuali|Hz massimi alla stessa risoluzione
+  public static List<string> Elenco() { var r = new List<string>();
+    for (int i=0;i<16;i++) { var dd=new DD(); dd.cb=Marshal.SizeOf(dd); if(!EnumDisplayDevicesW(null,i,ref dd,0)) break; if((dd.Flags&1)==0) continue;
+      var m=new DEVMODE(); m.size=(short)Marshal.SizeOf(m); if(!EnumDisplaySettingsW(dd.Name,-1,ref m)) continue;
+      int max=0; for(int j=0;;j++){ var t=new DEVMODE(); t.size=(short)Marshal.SizeOf(t); if(!EnumDisplaySettingsW(dd.Name,j,ref t)) break;
+        if(t.w==m.w && t.h==m.h && t.bpp==m.bpp && t.freq>max) max=t.freq; }
+      var mon=new DD(); mon.cb=Marshal.SizeOf(mon); EnumDisplayDevicesW(dd.Name,0,ref mon,0);
+      r.Add(dd.Name+"|"+mon.Str+"|"+m.w+"|"+m.h+"|"+m.bpp+"|"+m.freq+"|"+max); }
+    return r; }
+  // Imposta la frequenza mantenendo la risoluzione. 0 = ok, 1 = serve riavvio, <0 = errore.
+  public static int Frequenza(string dev, int freq) {
+    var m=new DEVMODE(); m.size=(short)Marshal.SizeOf(m); if(!EnumDisplaySettingsW(dev,-1,ref m)) return -100;
+    m.freq=freq; m.fields=0x80000|0x100000|0x400000; // larghezza, altezza, frequenza
+    return ChangeDisplaySettingsExW(dev, ref m, IntPtr.Zero, 0x01, IntPtr.Zero); }
 }
+"@
+}
+function ElencoSchermi {
+    foreach ($r in [FulmineSchermi]::Elenco()) {
+        $p = $r -split '\|'
+        [pscustomobject]@{ Nome = $p[0]; Monitor = $p[1]; L = [int]$p[2]; A = [int]$p[3]; Bit = [int]$p[4]; Hz = [int]$p[5]; Max = [int]$p[6] }
+    }
+}
+function CorreggiFrequenzaMonitor {
+    $k = 0
+    foreach ($s in @(ElencoSchermi)) {
+        $k++
+        $etichetta = "Monitor $k ($($s.L)x$($s.A))"
+        if ($s.Max -le $s.Hz) { Ok "${etichetta}: gia' alla frequenza massima ($($s.Hz) Hz)"; continue }
+        Problema "$etichetta a $($s.Hz) Hz, ma supporta $($s.Max) Hz"
+        if ($script:Prova) { Nota "[PROVA] porterei $etichetta da $($s.Hz) a $($s.Max) Hz"; continue }
+        $esito = [FulmineSchermi]::Frequenza($s.Nome, $s.Max)
+        $dopo = @(ElencoSchermi | Where-Object Nome -eq $s.Nome)
+        if ($esito -ge 0 -and $dopo -and $dopo[0].Hz -eq $s.Max) { Risolto "$etichetta -> da $($s.Hz) a $($s.Max) Hz" }
+        elseif ($esito -eq 1) { Risolto "$etichetta -> $($s.Max) Hz (attivo dopo il riavvio)"; Riavvio 'Nuova frequenza del monitor.' }
+        else { TocaATe "${etichetta}: imposta $($s.Max) Hz da Impostazioni > Sistema > Schermo > Schermo avanzato" }
+    }
+}
+
+# --- Programmi all'avvio: solo una lista SICURA ------------------------
+# Solo programmi Microsoft che partono da soli senza motivo. NON tocca mai:
+# Discord, launcher dei giochi, software di mouse/tastiere/cuffie (iCUE,
+# G HUB, Stream Deck...), antivirus, driver, OneDrive (backup dei file).
+$script:AvvioRun  = '^(Teams|com\.squirrel\.Teams\.Teams|MicrosoftEdgeAutoLaunch_[0-9A-F]+|Skype.*|Cortana)$'
+$script:AvvioStore = '^(MSTeams|MicrosoftTeams|Microsoft\.MicrosoftOfficeHub|MicrosoftWindows\.CrossDevice|Microsoft\.YourPhone|Microsoft\.Copilot|Microsoft\.Windows\.Ai\.Copilot\.Provider|Microsoft\.Todos|Microsoft\.PowerAutomateDesktop|Microsoft\.549981C3F5F10|Microsoft\.SkypeApp|Microsoft\.M365Companions)_'
+$script:ChiaviApproved = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run',
+                           'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run')
+$script:ChiaveStore = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData'
+
+function NomeLeggibile($n) {
+    switch -Regex ($n) {
+        'Teams'          { 'Microsoft Teams'; break }
+        'EdgeAutoLaunch' { 'Microsoft Edge (avvio automatico)'; break }
+        'OfficeHub'      { 'Microsoft 365 / Office'; break }
+        'CrossDevice|YourPhone' { 'Collegamento al telefono'; break }
+        'Copilot'        { 'Copilot'; break }
+        'Todos'          { 'Microsoft To Do'; break }
+        'PowerAutomate'  { 'Power Automate'; break }
+        '549981C3F5F10|Cortana' { 'Cortana'; break }
+        'Skype'          { 'Skype'; break }
+        'M365Companions' { 'Microsoft 365 Companions'; break }
+        default          { $n }
+    }
+}
+
+# Elenco dei programmi della lista presenti sul PC, con il loro stato attuale.
+function ElencoAvvioInutile {
+    $runKeys = @{ 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' = $script:ChiaviApproved[0]; 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' = $script:ChiaviApproved[1] }
+    foreach ($rk in $runKeys.Keys) {
+        $vals = Get-ItemProperty $rk -ErrorAction SilentlyContinue
+        if (-not $vals) { continue }
+        foreach ($nome in ($vals.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object Name)) {
+            if ($nome -notmatch $script:AvvioRun) { continue }
+            $ap = (Get-ItemProperty $runKeys[$rk] -Name $nome -ErrorAction SilentlyContinue).$nome
+            [pscustomobject]@{ Tipo = 'run'; Chiave = $runKeys[$rk]; Nome = $nome; Attivo = (-not $ap -or ($ap[0] -band 1) -eq 0); Originale = $(if ($ap) { [Convert]::ToBase64String([byte[]]$ap) } else { $null }) }
+        }
+    }
+    foreach ($pkg in (Get-ChildItem $script:ChiaveStore -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match $script:AvvioStore })) {
+        foreach ($task in (Get-ChildItem $pkg.PSPath -ErrorAction SilentlyContinue)) {
+            $st = (Get-ItemProperty $task.PSPath -Name State -ErrorAction SilentlyContinue).State
+            if ($null -eq $st) { continue }
+            [pscustomobject]@{ Tipo = 'store'; Chiave = $task.PSPath; Nome = $pkg.PSChildName; Attivo = ($st -eq 2); Originale = $st }
+        }
+    }
+}
+
+function DisattivaAvvioInutile {
+    $attivi = @(ElencoAvvioInutile | Where-Object Attivo)
+    if ($attivi.Count -eq 0) { Ok "Programmi inutili all'avvio: nessuno attivo"; return }
+    Problema "$($attivi.Count) programmi inutili partono all'avvio di Windows"
+    foreach ($a in $attivi) {
+        $nome = NomeLeggibile $a.Nome
+        if ($script:Prova) { Nota "[PROVA] toglierei dall'avvio: $nome"; continue }
+        try {
+            if ($a.Tipo -eq 'run') {
+                if (-not (Test-Path $a.Chiave)) { New-Item -Path $a.Chiave -Force | Out-Null }
+                $val = [byte[]](@(3, 0, 0, 0) + [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc()))
+                Set-ItemProperty -Path $a.Chiave -Name $a.Nome -Value $val -Type Binary -Force -ErrorAction Stop
+            } else {
+                Set-ItemProperty -Path $a.Chiave -Name State -Value 1 -Type DWord -Force -ErrorAction Stop
+            }
+            Risolto "Avvio automatico disattivato: $nome"
+        } catch { TocaATe "Non riesco a togliere $nome dall'avvio: Gestione attivita' > App di avvio > Disabilita" }
+    }
+}
+
+# --- Driver della scheda video -------------------------------------------
+function ControllaDriverVideo($gpu) {
+    if (-not $gpu -or -not $gpu.Data) { return }
+    $data = $gpu.Data; if ($data -is [string]) { try { $data = [Management.ManagementDateTimeConverter]::ToDateTime($data) } catch { return } }
+    $mesi = [int](((Get-Date) - $data).TotalDays / 30)
+    if ($mesi -lt 6) { Ok "Driver scheda video aggiornato ($($data.ToString('dd/MM/yyyy')))"; return }
+    Problema "Driver della scheda video vecchio di $mesi mesi ($($data.ToString('dd/MM/yyyy')))"
+    $pagina = switch ($gpu.Vendor) {
+        'NVIDIA' { 'https://www.nvidia.com/it-it/drivers/' }
+        'AMD'    { 'https://www.amd.com/it/support/download/drivers.html' }
+        'Intel'  { 'https://www.intel.it/content/www/it/it/support/detect.html' }
+        default  { $null }
+    }
+    if ($pagina -and -not $script:Prova) { Start-Process $pagina }
+    TocaATe "Aggiorna il driver della scheda video ($($gpu.Vendor))$(if ($pagina) { ": ho aperto la pagina ufficiale" })"
+}
+
+# --- Spazio sul disco di sistema ------------------------------------------
+function ControllaSpazioDisco {
+    $c = Get-Volume -DriveLetter $env:SystemDrive[0] -ErrorAction SilentlyContinue
+    if (-not $c -or -not $c.Size) { return }
+    $libero = [math]::Round($c.SizeRemaining / $c.Size * 100)
+    if ($libero -ge 10) { Ok "Disco di sistema: $libero% libero"; return }
+    Problema "Disco di sistema quasi pieno: solo $libero% libero"
+    TocaATe "Libera spazio su $($env:SystemDrive): con meno del 10% libero Windows e i giochi rallentano"
+}
+
+# --- RAM: profilo XMP/DOCP/EXPO -------------------------------------------
+function ControllaRAM {
+    $moduli = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+    if (-not $moduli) { return }
+    $attuale = ($moduli | Measure-Object ConfiguredClockSpeed -Minimum).Minimum
+    if (-not $attuale) { $attuale = ($moduli | Measure-Object Speed -Minimum).Minimum }
+    # La velocita' dichiarata e' quasi sempre nel codice del modulo (es. CMW32GX4M2Z3600C18 -> 3600).
+    $dichiarata = 0
+    foreach ($m in $moduli) {
+        foreach ($x in [regex]::Matches([string]$m.PartNumber, '(?<!\d)(2[4-9]\d\d|[3-8]\d\d\d)(?!\d)')) {
+            $v = [int]$x.Value; if ($v -gt $dichiarata -and $v % 100 -in 0, 33, 66) { $dichiarata = $v }
+        }
+    }
+    if ($dichiarata -gt 0 -and $attuale -and $dichiarata -gt ($attuale + 100)) {
+        Problema "RAM a $attuale MHz invece di $dichiarata MHz: il profilo XMP/DOCP/EXPO non e' attivo"
+        TocaATe "Attiva il profilo XMP/DOCP/EXPO nel BIOS (riavvia, premi Canc o F2, cerca 'XMP' o 'DOCP', scegli Profilo 1, salva con F10)"
+    } else {
+        Ok "RAM a $attuale MHz$(if ($dichiarata) { ' (velocita'' dichiarata raggiunta)' })"
+    }
+}
+
+# =====================================================================
+#  BACKUP delle voci nuove (1.2): per chi ha gia' un backup creato con
+#  una versione precedente, si aggiungono SOLO le voci mancanti, prese
+#  ora, prima di cambiarle. Le voci gia' salvate non si toccano.
+# =====================================================================
+function StatoNuoveVoci {
+    @{
+        schermi = @(ElencoSchermi | ForEach-Object { @{ nome = $_.Nome; monitor = $_.Monitor; l = $_.L; a = $_.A; hz = $_.Hz } })
+        avvio   = @(ElencoAvvioInutile | ForEach-Object { @{ tipo = $_.Tipo; chiave = $_.Chiave; nome = $_.Nome; originale = $_.Originale } })
+    }
+}
+function CompletaBackup {
+    if (-not (Test-Path -LiteralPath $fileBackup)) { return $false }
+    $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+    if (-not $b) { return $false }
+    $nuove = StatoNuoveVoci
+    $cambiato = $false
+    if ($null -eq $b.schermi) { $b | Add-Member -NotePropertyName schermi -NotePropertyValue $nuove.schermi -Force; $cambiato = $true }
+    if ($null -eq $b.avvio)   { $b | Add-Member -NotePropertyName avvio   -NotePropertyValue $nuove.avvio   -Force; $cambiato = $true }
+    else {
+        # Programmi della lista comparsi dopo il primo backup: si salva il loro stato attuale.
+        $noti = @($b.avvio | ForEach-Object { "$($_.chiave)|$($_.nome)" })
+        $extra = @($nuove.avvio | Where-Object { "$($_.chiave)|$($_.nome)" -notin $noti })
+        if ($extra.Count) { $b.avvio = @($b.avvio) + $extra; $cambiato = $true }
+    }
+    if ($cambiato) { $b | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8 }
+    return $true
+}
+
+function RipristinaNuoveVoci($b) {
+    foreach ($s in @($b.schermi)) {
+        if (-not $s.nome) { continue }
+        $ora = @(ElencoSchermi | Where-Object Nome -eq $s.nome)
+        if (-not $ora -or $ora[0].Hz -eq $s.hz) { continue }
+        if ($ora[0].L -ne $s.l -or $ora[0].A -ne $s.a) { Nota "Monitor $($s.nome): risoluzione cambiata da allora, frequenza lasciata com'e'"; continue }
+        if ([FulmineSchermi]::Frequenza($s.nome, [int]$s.hz) -ge 0) { Fatto "Monitor $($s.l)x$($s.a) -> di nuovo a $($s.hz) Hz" }
+        else { $script:ripristiniFalliti++; Avviso "Non sono riuscito a riportare il monitor $($s.nome) a $($s.hz) Hz" }
+    }
+    $n = 0
+    foreach ($a in @($b.avvio)) {
+        try {
+            if ($a.tipo -eq 'run') {
+                if ($null -eq $a.originale) { Remove-ItemProperty -Path $a.chiave -Name $a.nome -ErrorAction SilentlyContinue }
+                else { Set-ItemProperty -Path $a.chiave -Name $a.nome -Value ([Convert]::FromBase64String($a.originale)) -Type Binary -Force -ErrorAction Stop }
+            } elseif (Test-Path $a.chiave) {
+                Set-ItemProperty -Path $a.chiave -Name State -Value ([int]$a.originale) -Type DWord -Force -ErrorAction Stop
+            }
+            $n++
+        } catch { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare l'avvio di $(NomeLeggibile $a.nome)" }
+    }
+    if ($n) { Fatto "Programmi all'avvio riportati com'erano ($n)" }
+}
+
+# =====================================================================
+#  AVVIO
+# =====================================================================
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 Clear-Host
 Write-Host ""
@@ -315,77 +601,23 @@ for ($i=0; $i -lt $arte.Count; $i++) { Write-Host ("  " + $arte[$i]) -Foreground
 Write-Host ""
 Write-Host "  " -NoNewline
 Write-Host "[ " -NoNewline -ForegroundColor DarkGray
-Write-Host "ottimizzazione prestazioni per Windows" -NoNewline -ForegroundColor White
+Write-Host $(if ($Ripristina) { "ripristino" } else { "scansione e ottimizzazione del PC" }) -NoNewline -ForegroundColor White
 Write-Host " ]" -NoNewline -ForegroundColor DarkGray
 Write-Host "  v$VERSIONE" -ForegroundColor DarkYellow
 Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
 Write-Host ("  " + (" " * 46) + "~ by lozy ~") -ForegroundColor DarkGray
 Write-Host ""
+if ($Prova) { Avviso "MODALITA' PROVA: controllo tutto ma non cambio niente."; Write-Host "" }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $admin) {
-    Write-Host "  ATTENZIONE: non stai eseguendo come amministratore." -ForegroundColor Yellow
-    Write-Host "  La maggior parte delle ottimizzazioni non potra' essere applicata." -ForegroundColor Yellow
-    Write-Host "  Chiudi e avvia FULMINE.bat." -ForegroundColor Yellow
-    Write-Host ""
+if (-not $admin -and -not $Prova) {
+    Write-Host "  Servono i permessi di amministratore: chiudi e avvia $(if ($Ripristina) { 'Ripristina.bat' } else { 'FULMINE.bat' })." -ForegroundColor Yellow
+    Write-Host "  Senza, alcune modifiche fallirebbero e il PC resterebbe a meta'." -ForegroundColor Yellow
+    if (-not $NoPause) { Read-Host }
+    exit 1
 }
 
-Write-Host "  Rilevamento in corso..." -ForegroundColor Gray
-$gpu = RilevaSchedaVideo
-$dischi = DischiFissi
-$ceSSD = $false
-foreach ($d in $dischi) {
-    $fisico = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq (Get-Partition -DriveLetter $d.DriveLetter -ErrorAction SilentlyContinue).DiskNumber }
-    if ($fisico -and $fisico.MediaType -eq 'SSD' -and $d.DriveLetter -eq $env:SystemDrive[0]) { $ceSSD = $true }
-}
-$ram = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 -ExpandProperty Speed
-Write-Host ""
-StampaSuggerimentoGPU $gpu
-Nota "Disco di sistema: $(if($ceSSD){'SSD'}else{'HDD o non rilevato'})"
-if ($ram -and $ram -le 2666) {
-    Avviso "RAM a $ram MHz: se il tuo kit e' tarato per una velocita' superiore, il profilo"
-    Avviso "XMP/DOCP non e' attivo. Si attiva dal BIOS (tasto Canc all'avvio), non da qui:"
-    Avviso "e' un'impostazione della scheda madre, Windows non puo' cambiarla."
-}
-Write-Host ""
-
-Write-Host "  Cosa vuoi fare?" -ForegroundColor White
-Write-Host ""
-Write-Host "    [1]  PRESTAZIONI (FPS)" -ForegroundColor Red
-Write-Host "         Massimo FPS: piano energetico al massimo, GPU scheduling," -ForegroundColor DarkGray
-Write-Host "         niente overlay/registrazione, app in background bloccate," -ForegroundColor DarkGray
-Write-Host "         priorita' al gioco, effetti visivi minimi." -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    [2]  QUALITA' VISIVA" -ForegroundColor Cyan
-Write-Host "         Priorita' alla resa: effetti visivi al massimo, overlay" -ForegroundColor DarkGray
-Write-Host "         attivo per registrare, prestazioni comunque alte." -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    [3]  BILANCIATA" -ForegroundColor Green
-Write-Host "         Valori predefiniti di Windows, via di mezzo sensata." -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    [4]  RIPRISTINA" -ForegroundColor White
-Write-Host "         Torna esattamente a come era PRIMA di usare Fulmine." -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    [0]  Esci" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  Ogni modifica e' reversibile: il primo avvio salva lo stato" -ForegroundColor Gray
-Write-Host "  originale, che Ripristina puo' sempre riportare indietro." -ForegroundColor Gray
-Write-Host "  L'antivirus e il firewall non vengono mai toccati." -ForegroundColor Gray
-Write-Host ""
-$scelta = Read-Host "  Scrivi 1, 2, 3, 4 o 0 e premi INVIO"
-if ($scelta -eq '0') { exit }
-if ($scelta -notin @('1','2','3','4')) { Write-Host "  Scelta non valida." -ForegroundColor Red; Read-Host; exit }
-
-if (-not $admin -and $scelta -ne '4') {
-    Write-Host ""
-    Write-Host "  Senza permessi di amministratore posso applicare solo le" -ForegroundColor Yellow
-    Write-Host "  impostazioni utente (effetti visivi, Game Bar). Continuo comunque." -ForegroundColor Yellow
-}
-
-Write-Host ""
-Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
-
-if ($scelta -eq '4') {
+if ($Ripristina) {
     Write-Host "  RIPRISTINO IN CORSO" -ForegroundColor White
     Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
     Write-Host ""
@@ -395,86 +627,124 @@ if ($scelta -eq '4') {
     } else {
         $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
         Nota "Backup del $([datetime]$b.creato | ForEach-Object { $_.ToString('dd/MM/yyyy HH:mm') })"
-        if ($b.pianoEnergetico) { powercfg /setactive $b.pianoEnergetico; Fatto "Piano energetico ripristinato" }
-        if ($b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
+        $pianoOk = $true
+        if ($b.pianoEnergetico) {
+            powercfg /setactive $b.pianoEnergetico
+            $pianoOk = (powercfg /getactivescheme) -match [regex]::Escape($b.pianoEnergetico)
+            if ($pianoOk) { Fatto "Piano energetico ripristinato" }
+            else { $ripristiniFalliti++; Avviso "Non sono riuscito a riattivare il piano energetico originale" }
+        }
+        if ($pianoOk -and $b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
             powercfg -delete $b.ultimatePerfGuid
-            Fatto "Piano 'Prestazioni elevate personalizzate' creato da Fulmine -> rimosso (torna a come era prima anche nell'elenco)"
+            Fatto "Piano 'Prestazioni elevate personalizzate' creato da Fulmine -> rimosso"
         }
-        if ($null -ne $b.hags) {
-            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value $b.hags -Type DWord -Force
-            Fatto "Pianificazione GPU ripristinata"; Riavvio "La pianificazione GPU richiede un riavvio."
-        }
-        if ($null -ne $b.visualFx) {
-            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value $b.visualFx -Type DWord -Force
-            Fatto "Effetti visivi ripristinati"
-        }
-        if ($null -ne $b.backgroundApps) {
-            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled' -Value $b.backgroundApps -Type DWord -Force
-            Fatto "App in background ripristinate"
-        }
-        if ($null -ne $b.gameDvr) {
-            Set-ItemProperty -Path 'HKCU:\System\GameConfigStore' -Name 'GameDVR_Enabled' -Value $b.gameDvr -Type DWord -Force
-            Fatto "Game Bar ripristinata"
-        }
+        RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' $b.hags 'Valori della pianificazione GPU'
+        Riavvio "La pianificazione GPU richiede un riavvio."
+        RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' $b.visualFx 'Effetti visivi'
+        RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' $b.backgroundApps 'Permessi delle app in background'
+        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' $b.gameDvr 'Valori della Game Bar'
+        RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'AllowAutoGameMode' $b.gameBarAutoGameMode $null
+        RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'ShowStartupPanel' $b.gameBarShowStartup $null
         if ($b.sysMainStart) {
-            Set-Service -Name SysMain -StartupType $b.sysMainStart -ErrorAction SilentlyContinue
-            if ($b.sysMainStart -eq 'Automatic') { Start-Service -Name SysMain -ErrorAction SilentlyContinue }
-            Fatto "Servizio SysMain ripristinato"
+            # Il backup usa le parole di WMI ("Auto"), che Set-Service non accetta.
+            $avvioSysMain = switch ($b.sysMainStart) { 'Auto' { 'Automatic' } 'Automatic' { 'Automatic' } 'Disabled' { 'Disabled' } default { 'Manual' } }
+            try {
+                Set-Service -Name SysMain -StartupType $avvioSysMain -ErrorAction Stop
+                if ($avvioSysMain -eq 'Automatic') { Start-Service -Name SysMain -ErrorAction SilentlyContinue }
+                Fatto "Servizio SysMain ripristinato"
+            } catch { $ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare il servizio SysMain" }
         }
-        if ($null -ne $b.win32PrioritySeparation) {
-            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' -Name 'Win32PrioritySeparation' -Value $b.win32PrioritySeparation -Type DWord -Force
-            Fatto "Priorita' processi ripristinata"
-        }
-        if ($null -ne $b.fseGlobal) {
-            Set-ItemProperty -Path 'HKCU:\System\GameConfigStore' -Name 'GameDVR_FSEBehaviorMode' -Value $b.fseGlobal -Type DWord -Force
-            Fatto "Ottimizzazioni schermo intero ripristinate"
-        }
+        RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' $b.win32PrioritySeparation 'Valori di priorita'' dei processi'
+        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_FSEBehaviorMode' $b.fseGlobal 'Valori delle ottimizzazioni schermo intero'
+        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_HonorUserFSEBehaviorMode' $b.fseHonorUser $null
+        $nicFalliti = 0
         foreach ($n in $b.nic) {
             try {
                 $obj = Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue |
                        Where-Object { $_.InstanceName -eq $n.instanza }
-                if ($obj) { $obj.Enable = $n.abilitato; Set-CimInstance -InputObject $obj -ErrorAction SilentlyContinue }
-            } catch { }
+                if ($obj) { $obj.Enable = $n.abilitato; Set-CimInstance -InputObject $obj -ErrorAction Stop }
+            } catch { $nicFalliti++ }
         }
-        if ($b.nic -and $b.nic.Count -gt 0) { Fatto "Risparmio energia delle schede di rete ripristinato" }
+        if ($nicFalliti -gt 0) { $ripristiniFalliti += $nicFalliti; Avviso "Risparmio energia: $nicFalliti dispositivi non ripristinati" }
+        elseif ($b.nic -and @($b.nic).Count -gt 0) { Fatto "Risparmio energia dei dispositivi ripristinato" }
+        RipristinaNuoveVoci $b
         Write-Host ""
-        Write-Host "  Tutto riportato allo stato precedente a Fulmine." -ForegroundColor Green
+        if ($ripristiniFalliti -eq 0) { Write-Host "  Tutto riportato allo stato precedente a Fulmine." -ForegroundColor Green }
+        else { Write-Host "  Ripristino incompleto: $ripristiniFalliti voci non riuscite, vedi sopra." -ForegroundColor Yellow }
     }
 } else {
-    $modalita = switch ($scelta) { '1' {'prestazioni'} '2' {'qualita'} '3' {'bilanciata'} }
-    $nomeModalita = switch ($scelta) { '1' {'PRESTAZIONI (FPS)'} '2' {'QUALITA'' VISIVA'} '3' {'BILANCIATA'} }
-    Write-Host "  MODALITA': $nomeModalita" -ForegroundColor White
-    Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
+    # --- 1. Rilevamento ---------------------------------------------------
+    Write-Host "  [1/3] SCANSIONE DEL PC" -ForegroundColor White
+    Write-Host ("  " + ("-" * 68)) -ForegroundColor DarkGray
+    $gpu = RilevaSchedaVideo
+    $dischi = DischiFissi
+    $ceSSD = $false
+    foreach ($d in $dischi) {
+        $fisico = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq (Get-Partition -DriveLetter $d.DriveLetter -ErrorAction SilentlyContinue).DiskNumber }
+        if ($fisico -and $fisico.MediaType -eq 'SSD' -and $d.DriveLetter -eq $env:SystemDrive[0]) { $ceSSD = $true }
+    }
+    StampaSuggerimentoGPU $gpu
+    Nota "Disco di sistema: $(if($ceSSD){'SSD'}else{'HDD o non rilevato'})"
+    ControllaRAM
+    ControllaDriverVideo $gpu
+    ControllaSpazioDisco
     Write-Host ""
 
-    Backup
+    # --- 2. Backup --------------------------------------------------------
+    if (-not $Prova) {
+        if (-not (Backup) -or -not (CompletaBackup)) {
+            Write-Host "  Non riesco a salvare o leggere il backup dello stato originale:" -ForegroundColor Red
+            Write-Host "  non cambio nulla, altrimenti Ripristina non potrebbe tornare indietro." -ForegroundColor Red
+            if (-not $NoPause) { Read-Host }
+            exit 1
+        }
+    }
 
-    ImpostaPianoEnergetico $modalita
-    ImpostaHAGS ($modalita -ne 'bilanciata')
-    ImpostaEffettiVisivi $modalita
-    ImpostaAppInBackground ($modalita -eq 'prestazioni')
-    ImpostaGameBar $modalita
-    ImpostaSysMain ($modalita -eq 'prestazioni') $ceSSD
-    ImpostaPrioritaProcessi $modalita
-    ImpostaFullscreenOptimizations ($modalita -ne 'prestazioni')
-    ImpostaRisparmioEnergiaSchedeRete ($modalita -eq 'prestazioni')
-
-    if ($modalita -eq 'prestazioni') {
-        Write-Host ""
+    # --- 3. Ottimizzazione ----------------------------------------------
+    Write-Host ""
+    Write-Host "  [2/3] OTTIMIZZAZIONE" -ForegroundColor White
+    Write-Host ("  " + ("-" * 68)) -ForegroundColor DarkGray
+    CorreggiFrequenzaMonitor
+    DisattivaAvvioInutile
+    if ($Prova) {
+        Nota "[PROVA] applicherei anche: piano energetico massimo, pianificazione GPU, effetti visivi minimi,"
+        Nota "[PROVA] app in background bloccate, Game Bar senza registrazione, priorita' al gioco,"
+        Nota "[PROVA] risparmio energia di rete spento, pulizia file temporanei, TRIM degli SSD."
+    } else {
+        ImpostaPianoEnergetico 'prestazioni'
+        ImpostaHAGS $true
+        ImpostaEffettiVisivi 'prestazioni'
+        ImpostaAppInBackground $true
+        ImpostaGameBar 'prestazioni'
+        ImpostaSysMain $true $ceSSD
+        ImpostaPrioritaProcessi 'prestazioni'
+        ImpostaFullscreenOptimizations $false
+        ImpostaRisparmioEnergiaSchedeRete $true
         PuliziaRapida
         TrimDischiSSD $dischi
     }
 
+    # --- 4. Rapporto finale ---------------------------------------------
     Write-Host ""
+    Write-Host "  [3/3] RAPPORTO" -ForegroundColor White
     Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
-    Write-Host "  FATTO" -ForegroundColor Green
+    Write-Host "  Problemi trovati: $($Trovati.Count)" -ForegroundColor $(if ($Trovati.Count) { 'Yellow' } else { 'Green' })
+    foreach ($x in $Trovati) { Write-Host "    - $x" -ForegroundColor Gray }
+    Write-Host ""
+    Write-Host "  Sistemati da Fulmine: $($Sistemati.Count)" -ForegroundColor Green
+    foreach ($x in $Sistemati) { Write-Host "    + $x" -ForegroundColor Green }
+    if (-not $Prova) { Write-Host "  Inoltre: impostazioni di Windows al massimo delle prestazioni (piano energetico, GPU, Game Bar, rete, priorita')" -ForegroundColor DarkGreen }
+    if ($DaFare.Count) {
+        Write-Host ""
+        Write-Host "  DA FARE TU: $($DaFare.Count)" -ForegroundColor Yellow
+        foreach ($x in $DaFare) { Write-Host "    > $x" -ForegroundColor Yellow }
+    }
     if ($serveRiavvio.Count -gt 0) {
         Write-Host ""
-        Write-Host "  Per completare, riavvia il PC:" -ForegroundColor Magenta
-        foreach ($r in $serveRiavvio) { Write-Host "    - $r" -ForegroundColor Magenta }
+        Write-Host "  Per completare, riavvia il PC." -ForegroundColor Magenta
     }
     Write-Host ""
-    Write-Host "  Per tornare indietro in qualsiasi momento: FULMINE.bat > opzione 4." -ForegroundColor Gray
+    Write-Host "  Per tornare indietro in qualsiasi momento: Ripristina.bat" -ForegroundColor Gray
 }
 
 Write-Host ""
@@ -484,5 +754,7 @@ Write-Host "  ~  " -NoNewline -ForegroundColor DarkGray
 Write-Host "by " -NoNewline -ForegroundColor DarkGray
 Write-Host "lozy" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  Premi INVIO per chiudere..." -ForegroundColor DarkGray
-Read-Host
+if (-not $NoPause) {
+    Write-Host "  Premi INVIO per chiudere..." -ForegroundColor DarkGray
+    Read-Host
+}
