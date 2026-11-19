@@ -24,6 +24,8 @@
 
 Fine. Niente menu, niente scelte.
 
+Ogni operazione è un passo numerato con l'animazione **"in corso…"** e poi il risultato, quindi si vede sempre a che punto è. Il tutto in stile terminale da hacker, nei colori del fulmine. I dati mostrati (sistema, processore, memoria, privilegi) sono quelli **veri** del tuo PC.
+
 ## Cosa fa con quel clic
 
 **1. Scansione.** Fisso o portatile, scheda video (una o due), disco di sistema, RAM, età del driver video, spazio libero.
@@ -34,7 +36,7 @@ Fine. Niente menu, niente scelte.
 |---|---|
 | 🖥️ **Monitor** | se un monitor va a 60 Hz ma ne supporta di più (144, 240…), lo porta alla **frequenza massima**, senza cambiare la risoluzione |
 | 🚀 **Programmi all'avvio** | toglie dall'avvio **solo** programmi Microsoft che partono senza motivo (Teams, Edge, Office, Collegamento al telefono, Copilot, To Do…). **Non tocca mai** Discord, i launcher dei giochi, il software di mouse/tastiere/cuffie, l'antivirus, i driver, OneDrive |
-| 💻 **Portatili** | riconosce il portatile: prestazioni piene **in carica**, a batteria niente turbo e processore libero di scendere (meno calore, più autonomia) |
+| 💻 **Portatili** | riconosce il portatile: prestazioni piene **in carica**, a batteria niente turbo e processore libero di scendere (meno calore, più autonomia). Se non riesce a capirlo con certezza (per esempio un **fisso con gruppo di continuità UPS**, che Windows vede come una "batteria", o un PC assemblato con case sconosciuto), **te lo chiede una volta sola** e ricorda la risposta |
 | 🎮 **Doppia scheda video** | sui PC con scheda integrata + dedicata, imposta i giochi installati (Steam, Epic, Battle.net, EA, Riot, Ubisoft…) sulla **dedicata**, così non partono su quella debole. Non tocca le preferenze già impostate |
 | 🪟 **Giochi in finestra** | attiva le *Ottimizzazioni per i giochi in finestra* e la *frequenza variabile* (FreeSync/G-Sync) di Windows: meno ritardo nei giochi a schermo intero in finestra, come Warzone |
 | 🌐 **Windows Update** | spegne l'invio di aggiornamenti ad altri PC su Internet: banda libera, meno lag |

@@ -1,7 +1,7 @@
 ﻿# =====================================================================
 #
 #   FULMINE  -  il PC a razzo con un clic
-#   Versione 1.3  -  by lozy
+#   Versione 1.4  -  by lozy
 #
 #   Un doppio clic su FULMINE.bat: scansiona il PC e sistema da solo
 #   tutto quello che rallenta (monitor sotto la frequenza massima,
@@ -23,20 +23,124 @@
 param(
     [switch]$Ripristina,   # torna allo stato di prima di Fulmine
     [switch]$Prova,        # controlla tutto ma non cambia niente
-    [switch]$NoPause       # niente attesa finale (test)
+    [switch]$NoPause,      # niente attesa finale (test)
+    [switch]$Veloce        # niente animazioni (test)
 )
 $script:Prova = [bool]$Prova
+$script:Veloce = [bool]$Veloce
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
-$VERSIONE = '1.3'
+$VERSIONE = '1.4'
 
-function Ok($m)      { Write-Host "  [ OK ] $m" -ForegroundColor Green }
-function Nota($m)    { Write-Host "  [ .. ] $m" -ForegroundColor Gray }
-function Fatto($m)   { Write-Host "  [ >> ] $m" -ForegroundColor Cyan }
-function Avviso($m)  { Write-Host "  [ !! ] $m" -ForegroundColor Yellow }
-function Riavvio($m) { Write-Host "  [ R+ ] $m" -ForegroundColor Magenta; [void]$script:serveRiavvio.Add($m) }
+function Ok($m)      { Write-Host "      [ OK ] $m" -ForegroundColor Green }
+function Nota($m)    { Write-Host "      [ .. ] $m" -ForegroundColor Gray }
+function Fatto($m)   { Write-Host "      [ >> ] $m" -ForegroundColor Cyan }
+function Avviso($m)  { Write-Host "      [ !! ] $m" -ForegroundColor Yellow }
+function Riavvio($m) { Write-Host "      [ R+ ] $m" -ForegroundColor Magenta; [void]$script:serveRiavvio.Add($m) }
 $serveRiavvio = New-Object System.Collections.ArrayList
+
+# =====================================================================
+#  EFFETTI GRAFICI (stile terminale hacker, colori del fulmine)
+#  Servono a far vedere cosa sta succedendo: ogni operazione mostra
+#  "in corso..." mentre lavora, poi il risultato. -Veloce li salta.
+# =====================================================================
+$script:Rnd = New-Object Random
+function Pausa([int]$ms) { if (-not $script:Veloce -and $ms -gt 0) { Start-Sleep -Milliseconds $ms } }
+function Hex([int]$n) { -join (1..$n | ForEach-Object { '0123456789ABCDEF'[$script:Rnd.Next(16)] }) }
+function Larghezza { try { [Math]::Max(60, [Math]::Min(96, $Host.UI.RawUI.WindowSize.Width - 4)) } catch { 90 } }
+
+function Scrivi([string]$Testo, [string]$Colore = 'Yellow', [int]$Ritardo = 7, [switch]$NoNewline) {
+    if ($script:Veloce) { Write-Host $Testo -ForegroundColor $Colore -NoNewline:$NoNewline; return }
+    foreach ($c in $Testo.ToCharArray()) { Write-Host $c -NoNewline -ForegroundColor $Colore; Start-Sleep -Milliseconds $Ritardo }
+    if (-not $NoNewline) { Write-Host '' }
+}
+
+# Pioggia di caratteri esadecimali nei colori del fulmine.
+function Pioggia([int]$Righe = 12) {
+    if ($script:Veloce) { return }
+    $w = Larghezza
+    for ($i = 0; $i -lt $Righe; $i++) {
+        $s = -join (1..$w | ForEach-Object { if ($script:Rnd.Next(100) -lt 50) { '0123456789ABCDEF'[$script:Rnd.Next(16)] } else { ' ' } })
+        Write-Host $s -ForegroundColor (@('DarkYellow', 'DarkYellow', 'Yellow', 'DarkRed')[$script:Rnd.Next(4)])
+        Start-Sleep -Milliseconds 35
+    }
+    Clear-Host
+}
+
+function Barra([int]$Pct, [string]$Etichetta) {
+    $Pct = [Math]::Max(0, [Math]::Min(100, $Pct)); $n = [int](34 * $Pct / 100)
+    Write-Host ("`r  [" + ('█' * $n) + ('░' * (34 - $n)) + "] {0,3}%  {1}   " -f $Pct, $Etichetta) -NoNewline -ForegroundColor Yellow
+}
+
+function Fase([string]$Titolo, [int]$Passi) {
+    $script:NumPasso = 0; $script:TotPassi = $Passi
+    Write-Host ''
+    Write-Host '  ┌─' -NoNewline -ForegroundColor DarkYellow
+    Write-Host "[ $Titolo ]" -NoNewline -ForegroundColor Yellow
+    Write-Host ('─' * [Math]::Max(4, (Larghezza) - $Titolo.Length - 10)) -ForegroundColor DarkYellow
+    Pausa 150
+}
+
+# Un passo: animazione "in corso..." finche' non parte, titolo fisso, poi i risultati.
+function Passo([string]$Testo, [scriptblock]$Azione, [int]$Ms = 650) {
+    $script:NumPasso++
+    $num = '{0:D2}/{1:D2}' -f $script:NumPasso, $script:TotPassi
+    if (-not $script:Veloce) {
+        $frame = '░', '▒', '▓', '█', '▓', '▒'
+        $giri = [Math]::Max(1, [int]($Ms / 70))
+        for ($i = 0; $i -lt $giri; $i++) {
+            Write-Host ("`r  [{0}] [{1}] {2} in corso...  0x{3}   " -f $frame[$i % $frame.Count], $num, $Testo, (Hex 8)) -NoNewline -ForegroundColor Yellow
+            Start-Sleep -Milliseconds 70
+        }
+        Write-Host ("`r" + (' ' * ((Larghezza) + 2)) + "`r") -NoNewline
+    }
+    Write-Host '  [' -NoNewline -ForegroundColor DarkGray
+    Write-Host $num -NoNewline -ForegroundColor DarkYellow
+    Write-Host '] ' -NoNewline -ForegroundColor DarkGray
+    Write-Host "$Testo..." -ForegroundColor White
+    & $Azione
+}
+
+function Lampeggia([string]$Testo) {
+    if ($script:Veloce) { Write-Host "  $Testo" -ForegroundColor Yellow; return }
+    foreach ($c in 'Yellow', 'White', 'Red', 'Yellow', 'DarkYellow', 'Yellow') { Write-Host "`r  $Testo" -NoNewline -ForegroundColor $c; Start-Sleep -Milliseconds 80 }
+    Write-Host ''
+}
+
+# Sequenza di avvio: dati VERI del PC presentati in stile terminale.
+function Avvio {
+    Pioggia
+    Write-Host ''
+    $arte = @(
+        '███████╗██╗   ██╗██╗     ███╗   ███╗██╗███╗   ██╗███████╗',
+        '██╔════╝██║   ██║██║     ████╗ ████║██║████╗  ██║██╔════╝',
+        '█████╗  ██║   ██║██║     ██╔████╔██║██║██╔██╗ ██║█████╗  ',
+        '██╔══╝  ██║   ██║██║     ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ',
+        '██║     ╚██████╔╝███████╗██║ ╚═╝ ██║██║██║ ╚████║███████╗',
+        '╚═╝      ╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝'
+    )
+    $colori = @('Yellow', 'Yellow', 'DarkYellow', 'DarkYellow', 'Red', 'DarkRed')
+    for ($i = 0; $i -lt $arte.Count; $i++) { Write-Host ('  ' + $arte[$i]) -ForegroundColor $colori[$i]; Pausa 45 }
+    Write-Host ''
+    Write-Host '  ' -NoNewline; Write-Host ' by ' -NoNewline -ForegroundColor Black -BackgroundColor Yellow; Write-Host ' lozy ' -NoNewline -ForegroundColor Black -BackgroundColor DarkYellow
+    Scrivi "   ⚡ $(if ($Ripristina) { 'R I P R I S T I N O' } else { 'P C   A   R A Z Z O' })   ·   v$VERSIONE" Yellow 5
+    Write-Host ('  ' + ('═' * (Larghezza))) -ForegroundColor DarkYellow
+    if ($script:Veloce) { return }
+    $os  = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue)
+    $cpu = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+    $ram = [math]::Round(((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory) / 1GB)
+    foreach ($r in @(
+        "aggancio al sistema ............ $($os.Caption) (build $([Environment]::OSVersion.Version.Build))",
+        "processore ..................... $($cpu.Trim())",
+        "memoria ........................ $ram GB",
+        "sessione ....................... 0x$(Hex 4)-$(Hex 4)  ·  privilegi: $(if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'AMMINISTRATORE' } else { 'utente (solo lettura)' })"
+    )) { Write-Host '  [>>] ' -NoNewline -ForegroundColor DarkYellow; Scrivi $r Gray 3 }
+    $moduli = 'ENERGIA', 'GPU', 'MONITOR', 'MEMORIA', 'DISCHI', 'RETE', 'AVVIO', 'MOUSE'
+    for ($p = 0; $p -le 100; $p += 4) { Barra $p ("modulo " + $moduli[[Math]::Min($moduli.Count - 1, [int]($p / 100 * $moduli.Count))]); Start-Sleep -Milliseconds 45 }
+    Write-Host ''
+    Lampeggia '>>> MODULI CARICATI · INIZIO OPERAZIONI <<<'
+}
 
 function DischiFissi {
     $d = Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -and $_.DriveType -eq 'Fixed' }
@@ -535,10 +639,48 @@ function ControllaRAM {
 # =====================================================================
 
 # --- Portatile? ----------------------------------------------------------
-function RilevaPortatile {
-    $telaio = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes)
-    $tipiPortatile = 8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32
-    [bool]((@($telaio | Where-Object { $_ -in $tipiPortatile }).Count) -or @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).Count)
+# Fisso o portatile? Si guardano il tipo di case dichiarato e la batteria.
+# Quando i due segnali non bastano (case sconosciuto, oppure un fisso che
+# vede una "batteria": di solito un gruppo di continuita' UPS collegato via
+# USB) il risultato e' INCERTO e si chiede all'utente.
+# -Telaio / -Batterie servono solo ai test, per simulare altri PC.
+function RilevaPortatile([int[]]$Telaio = $null, [int]$Batterie = -1) {
+    if ($null -eq $Telaio) { $Telaio = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes) }
+    if ($Batterie -lt 0) { $Batterie = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).Count }
+    $portatili = 8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32
+    $fissi     = 3, 4, 5, 6, 7, 13, 15, 16, 17, 23, 24, 34, 35, 36
+    $ePortatile = @($Telaio | Where-Object { $_ -in $portatili }).Count -gt 0
+    $eFisso     = @($Telaio | Where-Object { $_ -in $fissi }).Count -gt 0
+    if ($ePortatile)                     { return [pscustomobject]@{ Portatile = $true;  Certo = $true;  Motivo = 'case da portatile' } }
+    if ($eFisso -and $Batterie -eq 0)    { return [pscustomobject]@{ Portatile = $false; Certo = $true;  Motivo = 'case da fisso, nessuna batteria' } }
+    if ($eFisso)                         { return [pscustomobject]@{ Portatile = $false; Certo = $false; Motivo = 'case da fisso ma con una batteria (forse un UPS)' } }
+    if ($Batterie -gt 0)                 { return [pscustomobject]@{ Portatile = $true;  Certo = $false; Motivo = 'case sconosciuto con una batteria' } }
+    [pscustomobject]@{ Portatile = $false; Certo = $true; Motivo = 'case sconosciuto, nessuna batteria' }
+}
+
+# Decide il tipo di PC: rilevamento, risposta gia' data in passato, oppure domanda.
+function StabilisciTipoPC {
+    $r = RilevaPortatile
+    if ($r.Certo) { return [pscustomobject]@{ Portatile = $r.Portatile; Come = "rilevato automaticamente: $($r.Motivo)"; Salva = $null } }
+    $salvato = $null
+    if (Test-Path -LiteralPath $fileBackup) { $salvato = (Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json).tipoPc }
+    if ($salvato -in 'portatile', 'fisso') { return [pscustomobject]@{ Portatile = ($salvato -eq 'portatile'); Come = 'indicato da te in passato'; Salva = $null } }
+    if ($script:Prova -or $NoPause) { return [pscustomobject]@{ Portatile = $false; Come = "in dubbio ($($r.Motivo)): trattato come fisso"; Salva = $null } }
+    Add-Type -AssemblyName System.Windows.Forms
+    # Finestra "proprietaria" sempre in primo piano: senza, la domanda puo' aprirsi dietro la console.
+    $proprietaria = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; WindowState = 'Minimized' }
+    $risposta = [System.Windows.Forms.MessageBox]::Show($proprietaria,
+        "Fulmine non riesce a capire con certezza che PC e' ($($r.Motivo)).`n`nQuesto PC e' un PORTATILE?`n`n- Si': in carica prestazioni piene, a batteria risparmia energia`n- No: e' un PC fisso`n`nLa risposta viene ricordata: non te lo chiedera' piu'.",
+        'Fulmine - fisso o portatile?', 'YesNo', 'Question')
+    $proprietaria.Dispose()
+    $p = ($risposta -eq 'Yes')
+    [pscustomobject]@{ Portatile = $p; Come = 'indicato da te'; Salva = $(if ($p) { 'portatile' } else { 'fisso' }) }
+}
+function SalvaTipoPC([string]$Tipo) {
+    if (-not $Tipo -or -not (Test-Path -LiteralPath $fileBackup)) { return }
+    $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
+    $b | Add-Member -NotePropertyName tipoPc -NotePropertyValue $Tipo -Force
+    $b | ConvertTo-Json -Depth 6 | Out-File -FilePath $fileBackup -Encoding utf8
 }
 
 # Sul piano energetico creato da Fulmine: in carica tutto al massimo, a
@@ -630,7 +772,11 @@ function OttimizzaGiochiInFinestra {
 # --- Windows Update: niente invio di aggiornamenti ad altri PC --------------
 $script:ChiaveDO = 'Registry::HKEY_USERS\S-1-5-20\Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings'
 function SpegniCondivisioneUpdate {
-    $attuale = (Get-ItemProperty $script:ChiaveDO -Name DownloadMode -ErrorAction SilentlyContinue).DownloadMode
+    # Questa impostazione sta nel profilo del servizio di rete: senza permessi
+    # di amministratore non si puo' nemmeno leggere (succede in modalita' prova).
+    try { $attuale = (Get-ItemProperty $script:ChiaveDO -Name DownloadMode -ErrorAction Stop).DownloadMode }
+    catch [System.Security.SecurityException] { Nota "Condivisione di Windows Update: non verificabile senza permessi di amministratore"; return }
+    catch { $attuale = $null }
     if ($attuale -eq 0) { Ok "Windows Update: condivisione degli aggiornamenti con altri PC gia' spenta"; return }
     Problema "Windows Update usa la tua connessione per inviare aggiornamenti ad altri PC"
     if ($script:Prova) { Nota "[PROVA] spegnerei la condivisione degli aggiornamenti con altri PC"; return }
@@ -759,31 +905,14 @@ function RipristinaNuoveVoci($b) {
 #  AVVIO
 # =====================================================================
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+try { $Host.UI.RawUI.WindowTitle = "FULMINE v$VERSIONE  ·  by lozy" } catch {}
 Clear-Host
-Write-Host ""
-$arte = @(
-    '███████╗██╗   ██╗██╗     ███╗   ███╗██╗███╗   ██╗███████╗',
-    '██╔════╝██║   ██║██║     ████╗ ████║██║████╗  ██║██╔════╝',
-    '█████╗  ██║   ██║██║     ██╔████╔██║██║██╔██╗ ██║█████╗  ',
-    '██╔══╝  ██║   ██║██║     ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ',
-    '██║     ╚██████╔╝███████╗██║ ╚═╝ ██║██║██║ ╚████║███████╗',
-    '╚═╝      ╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝'
-)
-$colori = @('Yellow','Yellow','DarkYellow','DarkYellow','Red','DarkRed')
-for ($i=0; $i -lt $arte.Count; $i++) { Write-Host ("  " + $arte[$i]) -ForegroundColor $colori[$i] }
-Write-Host ""
-Write-Host "  " -NoNewline
-Write-Host "[ " -NoNewline -ForegroundColor DarkGray
-Write-Host $(if ($Ripristina) { "ripristino" } else { "scansione e ottimizzazione del PC" }) -NoNewline -ForegroundColor White
-Write-Host " ]" -NoNewline -ForegroundColor DarkGray
-Write-Host "  v$VERSIONE" -ForegroundColor DarkYellow
-Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
-Write-Host ("  " + (" " * 46) + "~ by lozy ~") -ForegroundColor DarkGray
-Write-Host ""
-if ($Prova) { Avviso "MODALITA' PROVA: controllo tutto ma non cambio niente."; Write-Host "" }
+Avvio
+if ($Prova) { Write-Host ''; Avviso "MODALITA' PROVA: controllo tutto ma non cambio niente." }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin -and -not $Prova) {
+    Write-Host ''
     Write-Host "  Servono i permessi di amministratore: chiudi e avvia $(if ($Ripristina) { 'Ripristina.bat' } else { 'FULMINE.bat' })." -ForegroundColor Yellow
     Write-Host "  Senza, alcune modifiche fallirebbero e il PC resterebbe a meta'." -ForegroundColor Yellow
     if (-not $NoPause) { Read-Host }
@@ -791,81 +920,86 @@ if (-not $admin -and -not $Prova) {
 }
 
 if ($Ripristina) {
-    Write-Host "  RIPRISTINO IN CORSO" -ForegroundColor White
-    Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
-    Write-Host ""
+    Fase 'RIPRISTINO' 3
     if (-not (Test-Path -LiteralPath $fileBackup)) {
         Write-Host "  Nessun backup trovato: Fulmine non ha ancora modificato nulla su" -ForegroundColor Yellow
         Write-Host "  questo PC, quindi non c'e' niente da ripristinare." -ForegroundColor Yellow
     } else {
         $b = Get-Content -LiteralPath $fileBackup -Raw | ConvertFrom-Json
-        Nota "Backup del $([datetime]$b.creato | ForEach-Object { $_.ToString('dd/MM/yyyy HH:mm') })"
-        $pianoOk = $true
-        if ($b.pianoEnergetico) {
-            powercfg /setactive $b.pianoEnergetico
-            $pianoOk = (powercfg /getactivescheme) -match [regex]::Escape($b.pianoEnergetico)
-            if ($pianoOk) { Fatto "Piano energetico ripristinato" }
-            else { $ripristiniFalliti++; Avviso "Non sono riuscito a riattivare il piano energetico originale" }
-        }
-        if ($pianoOk -and $b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
-            powercfg -delete $b.ultimatePerfGuid
-            Fatto "Piano 'Prestazioni elevate personalizzate' creato da Fulmine -> rimosso"
-        }
-        RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' $b.hags 'Valori della pianificazione GPU'
-        Riavvio "La pianificazione GPU richiede un riavvio."
-        RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' $b.visualFx 'Effetti visivi'
-        RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' $b.backgroundApps 'Permessi delle app in background'
-        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' $b.gameDvr 'Valori della Game Bar'
-        RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'AllowAutoGameMode' $b.gameBarAutoGameMode $null
-        RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'ShowStartupPanel' $b.gameBarShowStartup $null
-        if ($b.sysMainStart) {
-            # Il backup usa le parole di WMI ("Auto"), che Set-Service non accetta.
-            $avvioSysMain = switch ($b.sysMainStart) { 'Auto' { 'Automatic' } 'Automatic' { 'Automatic' } 'Disabled' { 'Disabled' } default { 'Manual' } }
-            try {
-                Set-Service -Name SysMain -StartupType $avvioSysMain -ErrorAction Stop
-                if ($avvioSysMain -eq 'Automatic') { Start-Service -Name SysMain -ErrorAction SilentlyContinue }
-                Fatto "Servizio SysMain ripristinato"
-            } catch { $ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare il servizio SysMain" }
-        }
-        RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' $b.win32PrioritySeparation 'Valori di priorita'' dei processi'
-        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_FSEBehaviorMode' $b.fseGlobal 'Valori delle ottimizzazioni schermo intero'
-        RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_HonorUserFSEBehaviorMode' $b.fseHonorUser $null
-        $nicFalliti = 0
-        foreach ($n in $b.nic) {
-            try {
-                $obj = Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue |
-                       Where-Object { $_.InstanceName -eq $n.instanza }
-                if ($obj) { $obj.Enable = $n.abilitato; Set-CimInstance -InputObject $obj -ErrorAction Stop }
-            } catch { $nicFalliti++ }
-        }
-        if ($nicFalliti -gt 0) { $ripristiniFalliti += $nicFalliti; Avviso "Risparmio energia: $nicFalliti dispositivi non ripristinati" }
-        elseif ($b.nic -and @($b.nic).Count -gt 0) { Fatto "Risparmio energia dei dispositivi ripristinato" }
-        RipristinaNuoveVoci $b
-        Write-Host ""
-        if ($ripristiniFalliti -eq 0) { Write-Host "  Tutto riportato allo stato precedente a Fulmine." -ForegroundColor Green }
-        else { Write-Host "  Ripristino incompleto: $ripristiniFalliti voci non riuscite, vedi sopra." -ForegroundColor Yellow }
+        Passo 'Lettura del backup originale' { Nota "Backup del $([datetime]$b.creato | ForEach-Object { $_.ToString('dd/MM/yyyy HH:mm') })" }
+        Passo 'Ripristino delle impostazioni di Windows' {
+            $script:pianoOk = $true
+            if ($b.pianoEnergetico) {
+                powercfg /setactive $b.pianoEnergetico
+                $script:pianoOk = (powercfg /getactivescheme) -match [regex]::Escape($b.pianoEnergetico)
+                if ($script:pianoOk) { Fatto "Piano energetico ripristinato" }
+                else { $script:ripristiniFalliti++; Avviso "Non sono riuscito a riattivare il piano energetico originale" }
+            }
+            if ($script:pianoOk -and $b.ultimatePerfGuid -and (powercfg /list) -match [regex]::Escape($b.ultimatePerfGuid)) {
+                powercfg -delete $b.ultimatePerfGuid
+                Fatto "Piano 'Prestazioni elevate personalizzate' creato da Fulmine -> rimosso"
+            }
+            RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' $b.hags 'Valori della pianificazione GPU'
+            Riavvio "La pianificazione GPU richiede un riavvio."
+            RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' $b.visualFx 'Effetti visivi'
+            RipristinaValore 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' $b.backgroundApps 'Permessi delle app in background'
+            RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' $b.gameDvr 'Valori della Game Bar'
+            RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'AllowAutoGameMode' $b.gameBarAutoGameMode $null
+            RipristinaValore 'HKCU:\Software\Microsoft\GameBar' 'ShowStartupPanel' $b.gameBarShowStartup $null
+            if ($b.sysMainStart) {
+                # Il backup usa le parole di WMI ("Auto"), che Set-Service non accetta.
+                $avvioSysMain = switch ($b.sysMainStart) { 'Auto' { 'Automatic' } 'Automatic' { 'Automatic' } 'Disabled' { 'Disabled' } default { 'Manual' } }
+                try {
+                    Set-Service -Name SysMain -StartupType $avvioSysMain -ErrorAction Stop
+                    if ($avvioSysMain -eq 'Automatic') { Start-Service -Name SysMain -ErrorAction SilentlyContinue }
+                    Fatto "Servizio SysMain ripristinato"
+                } catch { $script:ripristiniFalliti++; Avviso "Non sono riuscito a ripristinare il servizio SysMain" }
+            }
+            RipristinaValore 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' $b.win32PrioritySeparation 'Valori di priorita'' dei processi'
+            RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_FSEBehaviorMode' $b.fseGlobal 'Valori delle ottimizzazioni schermo intero'
+            RipristinaValore 'HKCU:\System\GameConfigStore' 'GameDVR_HonorUserFSEBehaviorMode' $b.fseHonorUser $null
+            $nicFalliti = 0
+            foreach ($n in $b.nic) {
+                try {
+                    $obj = Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue |
+                           Where-Object { $_.InstanceName -eq $n.instanza }
+                    if ($obj) { $obj.Enable = $n.abilitato; Set-CimInstance -InputObject $obj -ErrorAction Stop }
+                } catch { $nicFalliti++ }
+            }
+            if ($nicFalliti -gt 0) { $script:ripristiniFalliti += $nicFalliti; Avviso "Risparmio energia: $nicFalliti dispositivi non ripristinati" }
+            elseif ($b.nic -and @($b.nic).Count -gt 0) { Fatto "Risparmio energia dei dispositivi ripristinato" }
+        } 1200
+        Passo 'Ripristino di monitor, avvio, mouse e grafica' { RipristinaNuoveVoci $b } 900
+        Write-Host ''
+        Write-Host ('  ' + ('═' * (Larghezza))) -ForegroundColor DarkYellow
+        if ($script:ripristiniFalliti -eq 0) { Lampeggia '✓ TUTTO RIPORTATO ALLO STATO PRECEDENTE A FULMINE' }
+        else { Write-Host "  Ripristino incompleto: $($script:ripristiniFalliti) voci non riuscite, vedi sopra." -ForegroundColor Yellow }
     }
 } else {
-    # --- 1. Rilevamento ---------------------------------------------------
-    Write-Host "  [1/3] SCANSIONE DEL PC" -ForegroundColor White
-    Write-Host ("  " + ("-" * 68)) -ForegroundColor DarkGray
-    $gpu = RilevaSchedaVideo
-    $dischi = DischiFissi
-    $ceSSD = $false
-    foreach ($d in $dischi) {
-        $fisico = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq (Get-Partition -DriveLetter $d.DriveLetter -ErrorAction SilentlyContinue).DiskNumber }
-        if ($fisico -and $fisico.MediaType -eq 'SSD' -and $d.DriveLetter -eq $env:SystemDrive[0]) { $ceSSD = $true }
+    # --- 1. Scansione ------------------------------------------------------
+    Fase 'FASE 1/3 · SCANSIONE DEL PC' 6
+    $gpu = $null; $dischi = $null; $ceSSD = $false
+    Passo 'Rilevamento scheda video' { $script:gpu = RilevaSchedaVideo; StampaSuggerimentoGPU $script:gpu }
+    $gpu = $script:gpu
+    Passo 'Analisi dei dischi' {
+        $script:dischi = DischiFissi
+        foreach ($d in $script:dischi) {
+            $fisico = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq (Get-Partition -DriveLetter $d.DriveLetter -ErrorAction SilentlyContinue).DiskNumber }
+            if ($fisico -and $fisico.MediaType -eq 'SSD' -and $d.DriveLetter -eq $env:SystemDrive[0]) { $script:ceSSD = $true }
+        }
+        Nota "Disco di sistema: $(if($script:ceSSD){'SSD'}else{'HDD o non rilevato'})"
     }
-    StampaSuggerimentoGPU $gpu
-    Nota "Disco di sistema: $(if($ceSSD){'SSD'}else{'HDD o non rilevato'})"
-    $script:Portatile = RilevaPortatile
-    Nota "Tipo di PC: $(if ($script:Portatile) { 'portatile (adatto il piano energetico alla batteria)' } else { 'fisso' })"
-    ControllaRAM
-    ControllaDriverVideo $gpu
-    ControllaSpazioDisco
-    Write-Host ""
+    $dischi = $script:dischi; $ceSSD = $script:ceSSD
+    Passo 'Identificazione del tipo di PC' {
+        $script:TipoPC = StabilisciTipoPC
+        $script:Portatile = $script:TipoPC.Portatile
+        Nota "Tipo di PC: $(if ($script:Portatile) { 'PORTATILE (adatto il piano energetico alla batteria)' } else { 'FISSO' }) - $($script:TipoPC.Come)"
+    }
+    Passo 'Controllo della memoria RAM' { ControllaRAM }
+    Passo 'Controllo del driver video' { ControllaDriverVideo $gpu }
+    Passo 'Controllo dello spazio su disco' { ControllaSpazioDisco }
 
-    # --- 2. Backup --------------------------------------------------------
+    # --- 2. Backup -----------------------------------------------------------
     if (-not $Prova) {
         if (-not (Backup) -or -not (CompletaBackup)) {
             Write-Host "  Non riesco a salvare o leggere il backup dello stato originale:" -ForegroundColor Red
@@ -873,58 +1007,57 @@ if ($Ripristina) {
             if (-not $NoPause) { Read-Host }
             exit 1
         }
+        SalvaTipoPC $script:TipoPC.Salva
     }
 
-    # --- 3. Ottimizzazione ----------------------------------------------
-    Write-Host ""
-    Write-Host "  [2/3] OTTIMIZZAZIONE" -ForegroundColor White
-    Write-Host ("  " + ("-" * 68)) -ForegroundColor DarkGray
-    CorreggiFrequenzaMonitor
-    DisattivaAvvioInutile
-    GpuDedicataPerGiochi
-    OttimizzaGiochiInFinestra
-    SpegniCondivisioneUpdate
-    SpegniAccelerazioneMouse
-    if (-not $Prova) { SalvaGpuAggiunti }
+    # --- 3. Ottimizzazione -----------------------------------------------------
+    Fase 'FASE 2/3 · OTTIMIZZAZIONE' $(if ($Prova) { 7 } else { 17 })
+    Passo 'Frequenza dei monitor' { CorreggiFrequenzaMonitor }
+    Passo "Programmi all'avvio" { DisattivaAvvioInutile }
+    Passo 'Scheda video per i giochi' { GpuDedicataPerGiochi; if (-not $Prova) { SalvaGpuAggiunti } } 900
+    Passo 'Ottimizzazioni per i giochi in finestra' { OttimizzaGiochiInFinestra }
+    Passo 'Condivisione di Windows Update' { SpegniCondivisioneUpdate }
+    Passo 'Accelerazione del mouse' { SpegniAccelerazioneMouse }
     if ($Prova) {
-        Nota "[PROVA] applicherei anche: piano energetico massimo, pianificazione GPU, effetti visivi minimi,"
-        Nota "[PROVA] app in background bloccate, Game Bar senza registrazione, priorita' al gioco,"
-        Nota "[PROVA] risparmio energia di rete spento, pulizia file temporanei, TRIM degli SSD."
+        Passo 'Impostazioni di Windows' {
+            Nota "[PROVA] applicherei anche: piano energetico massimo, pianificazione GPU, effetti visivi minimi,"
+            Nota "[PROVA] app in background bloccate, Game Bar senza registrazione, priorita' al gioco,"
+            Nota "[PROVA] risparmio energia di rete spento, pulizia file temporanei, TRIM degli SSD."
+        }
     } else {
-        ImpostaPianoEnergetico 'prestazioni'
-        AdattaPortatile
-        ImpostaHAGS $true
-        ImpostaEffettiVisivi 'prestazioni'
-        ImpostaAppInBackground $true
-        ImpostaGameBar 'prestazioni'
-        ImpostaSysMain $true $ceSSD
-        ImpostaPrioritaProcessi 'prestazioni'
-        ImpostaFullscreenOptimizations $false
-        ImpostaRisparmioEnergiaSchedeRete $true
-        PuliziaRapida
-        TrimDischiSSD $dischi
+        Passo 'Piano energetico' { ImpostaPianoEnergetico 'prestazioni'; AdattaPortatile } 900
+        Passo 'Pianificazione GPU' { ImpostaHAGS $true }
+        Passo 'Effetti visivi' { ImpostaEffettiVisivi 'prestazioni' }
+        Passo 'App in background' { ImpostaAppInBackground $true }
+        Passo 'Game Bar e Modalita'' gioco' { ImpostaGameBar 'prestazioni' }
+        Passo 'Servizio SysMain' { ImpostaSysMain $true $ceSSD }
+        Passo "Priorita' ai giochi" { ImpostaPrioritaProcessi 'prestazioni' }
+        Passo 'Schermo intero esclusivo' { ImpostaFullscreenOptimizations $false }
+        Passo 'Risparmio energia della rete' { ImpostaRisparmioEnergiaSchedeRete $true }
+        Passo 'Pulizia dei file temporanei (puo'' richiedere qualche secondo)' { PuliziaRapida }
+        Passo 'TRIM degli SSD (puo'' richiedere qualche secondo)' { TrimDischiSSD $dischi }
     }
 
-    # --- 4. Rapporto finale ---------------------------------------------
-    Write-Host ""
-    Write-Host "  [3/3] RAPPORTO" -ForegroundColor White
-    Write-Host ("  " + ("=" * 68)) -ForegroundColor DarkGray
+    # --- 4. Rapporto finale -------------------------------------------------
+    Fase 'FASE 3/3 · RAPPORTO' 0
     Write-Host "  Problemi trovati: $($Trovati.Count)" -ForegroundColor $(if ($Trovati.Count) { 'Yellow' } else { 'Green' })
-    foreach ($x in $Trovati) { Write-Host "    - $x" -ForegroundColor Gray }
-    Write-Host ""
+    foreach ($x in $Trovati) { Write-Host "    - $x" -ForegroundColor Gray; Pausa 60 }
+    Write-Host ''
     Write-Host "  Sistemati da Fulmine: $($Sistemati.Count)" -ForegroundColor Green
-    foreach ($x in $Sistemati) { Write-Host "    + $x" -ForegroundColor Green }
+    foreach ($x in $Sistemati) { Write-Host "    + $x" -ForegroundColor Green; Pausa 60 }
     if (-not $Prova) { Write-Host "  Inoltre: impostazioni di Windows al massimo delle prestazioni (piano energetico, GPU, Game Bar, rete, priorita')" -ForegroundColor DarkGreen }
     if ($DaFare.Count) {
-        Write-Host ""
+        Write-Host ''
         Write-Host "  DA FARE TU: $($DaFare.Count)" -ForegroundColor Yellow
-        foreach ($x in $DaFare) { Write-Host "    > $x" -ForegroundColor Yellow }
+        foreach ($x in $DaFare) { Write-Host "    > $x" -ForegroundColor Yellow; Pausa 60 }
     }
     if ($serveRiavvio.Count -gt 0) {
-        Write-Host ""
+        Write-Host ''
         Write-Host "  Per completare, riavvia il PC." -ForegroundColor Magenta
     }
-    Write-Host ""
+    Write-Host ''
+    Write-Host ('  ' + ('═' * (Larghezza))) -ForegroundColor DarkYellow
+    if (-not $Prova) { Lampeggia '⚡⚡⚡  PC A RAZZO  ·  OTTIMIZZAZIONE COMPLETATA  ⚡⚡⚡' }
     Write-Host "  Per tornare indietro in qualsiasi momento: Ripristina.bat" -ForegroundColor Gray
 }
 
